@@ -1,0 +1,42 @@
+{% extends '../store/base.html' %}
+
+{% block content %}
+    <h1>Shopping Cart</h1>
+    <table>
+        <thead>
+            <tr>
+                <th>Product</th>
+                <th>Price</th>
+                <th>Quantity</th>
+                <th>Total Price</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for cart_item in cart_items %}
+                <tr>
+                    <td>{{ cart_item.product.name }}</td>
+                    <td>{{ cart_item.product.price }}</td>
+                    <td>
+                        {% comment %} <form action="{% url 'remove_from_cart' cart_item.id %}" method="POST">
+                            {% csrf_token %}
+                            <button type="submit">-</button>
+                        </form>
+                        {% endcomment %}
+                        {{ cart_item.quantity }}
+                        {% comment %} <form action="{% url 'add_to_cart' cart_item.product_id %}" method="POST">
+                            {% csrf_token %}
+                            <button type="submit">+</button>
+                        </form>  {% endcomment %}
+                    </td>
+                    {% comment %} <td>{{ cart_item.quantity * cart_item.product.price }}</td> {% endcomment %}
+                </tr>
+            {% endfor %}
+        </tbody>
+        <tfoot>
+            <tr>
+                <td colspan="3">Total Price:</td>
+                <td>{{ total_price }}</td>
+            </tr>
+        </tfoot>
+    </table>
+{% endblock %}

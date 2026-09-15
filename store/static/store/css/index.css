@@ -1,0 +1,58 @@
+/* BG IMAGE */
+#hero {
+    width: 100%;
+    /* height: calc(100vh - 84.8px); */
+    background-image: url(../images/phoenix_hero_2.png);
+    background-position: center; /* Center the image */
+    background-repeat: no-repeat; /* Do not repeat the image */               
+    background-size: cover; /* Resize the background image to cover the entire container */
+}
+
+/* HERO TEXT POSITION */
+.hero-text {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    padding-right: 5rem;
+    padding-top: 60vh;
+}
+
+/* HERO TEXT PROPERTIES */
+.hero-text h2 {
+    color:aliceblue;
+    font-variant: small-caps;
+    font-size: 3rem;
+}
+
+/* MEDIA QUERIES */
+@media only screen and (max-width: 560px) {
+    /* CHANGE BG IMAGE FOR A SMALLER VERSION  */
+  #hero {
+    width: 100%;
+    background-image: url('../images/phoenix_vanz_hero_small.png');
+    background-position: center; 
+    background-repeat: no-repeat;        
+    background-size: cover; 
+  }
+
+  /* ADJUST TEXT SIZE & SPACING FOR SMALLER SCREEN */
+  .hero-text h2 {
+    font-size: 2.5rem;
+    padding-bottom: 1rem;
+  }
+
+  /* ALIGN TEXT CENTRE ON SMALLER SCREENS */
+  .hero-text {
+    align-items: center;
+    padding-right: 0;
+  }
+}
+
+
+@media only screen and (max-width: 560px) {
+    /* ADJUST TEXT SIZE & SPACING FOR SMALLER SCREEN */
+    .hero-text h2 {
+        font-size: 1.5rem;
+        padding-bottom: 0.5rem;
+    }
+}

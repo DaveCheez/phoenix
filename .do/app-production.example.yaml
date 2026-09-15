@@ -1,0 +1,103 @@
+# REFERENCE TEMPLATE ONLY.
+# Do not upload this over an already-configured app unless you first copy
+# the app's current encrypted secret values into the spec. The safer
+# cutover method is to add production domains in the Networking tab.
+# IMPORTANT: keep this app in the same region as the existing managed PostgreSQL database.
+# The template currently uses London (lon); change it before deployment if your database is elsewhere.
+name: phoenix-vanz-api-next
+region: lon
+features:
+  - buildpack-stack=ubuntu-22
+alerts:
+  - rule: DEPLOYMENT_FAILED
+  - rule: DOMAIN_FAILED
+domains:
+  - domain: api.phoenixvanz.com
+    type: PRIMARY
+envs:
+  - key: DJANGO_SECRET_KEY
+    value: REPLACE_WITH_A_NEW_RANDOM_DJANGO_SECRET
+    scope: RUN_AND_BUILD_TIME
+    type: SECRET
+  - key: DEBUG_SETTING
+    value: "False"
+    scope: RUN_AND_BUILD_TIME
+    type: GENERAL
+  - key: DATABASE_URL
+    value: REPLACE_WITH_EXISTING_POSTGRESQL_CONNECTION_STRING
+    scope: RUN_TIME
+    type: SECRET
+  - key: DJANGO_ALLOWED_HOSTS
+    value: .ondigitalocean.app,api.phoenixvanz.com
+    scope: RUN_TIME
+    type: GENERAL
+  - key: DJANGO_CSRF_TRUSTED_ORIGINS
+    value: https://phoenixvanz.com,https://www.phoenixvanz.com,https://api.phoenixvanz.com
+    scope: RUN_TIME
+    type: GENERAL
+  - key: CORS_ALLOWED_ORIGINS
+    value: https://phoenixvanz.com,https://www.phoenixvanz.com
+    scope: RUN_TIME
+    type: GENERAL
+  - key: SITE_URL
+    value: ${APP_URL}
+    scope: RUN_TIME
+    type: GENERAL
+  - key: AWS_ACCESS_KEY_ID
+    value: REPLACE_WITH_NEW_SPACES_ACCESS_KEY
+    scope: RUN_TIME
+    type: SECRET
+  - key: AWS_SECRET_ACCESS_KEY
+    value: REPLACE_WITH_NEW_SPACES_SECRET_KEY
+    scope: RUN_TIME
+    type: SECRET
+  - key: AWS_STORAGE_BUCKET_NAME
+    value: phoenixvanz
+    scope: RUN_TIME
+    type: GENERAL
+  - key: AWS_S3_ENDPOINT_URL
+    value: https://fra1.digitaloceanspaces.com
+    scope: RUN_TIME
+    type: GENERAL
+  - key: AWS_S3_REGION_NAME
+    value: fra1
+    scope: RUN_TIME
+    type: GENERAL
+  - key: AWS_S3_CUSTOM_DOMAIN
+    value: phoenixvanz.fra1.digitaloceanspaces.com
+    scope: RUN_TIME
+    type: GENERAL
+services:
+  - name: django-api
+    environment_slug: python
+    github:
+      repo: DaveCheez/pheonix
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    build_command: python manage.py collectstatic --noinput
+    run_command: >-
+      gunicorn --worker-tmp-dir /dev/shm --bind 0.0.0.0:$PORT
+      --workers 2 --threads 2 --timeout 120 base.wsgi:application
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    health_check:
+      http_path: /health/
+      initial_delay_seconds: 15
+      period_seconds: 10
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 6
+jobs:
+  - name: migrate
+    kind: PRE_DEPLOY
+    environment_slug: python
+    github:
+      repo: DaveCheez/pheonix
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    run_command: python manage.py migrate --noinput
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb

@@ -1,0 +1,24 @@
+p {
+    font-size: 1.5rem;
+}
+
+.text {
+    max-width: 80%;
+    margin: 5rem auto;
+}
+
+.phoenix {
+    color: #FBC222;
+}
+
+@media (min-width: 840px) {
+    .text {
+        max-width: 60%;
+    } 
+}
+
+@media (max-width: 580px) {
+    p {
+        font-size: 1rem;
+    } 
+}
