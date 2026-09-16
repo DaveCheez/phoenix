@@ -134,3 +134,45 @@ class Review(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.stars}★)"
+
+class HomeSlide(models.Model):
+    """Homepage hero content managed from Django admin."""
+
+    title = models.CharField(max_length=160, default="Phoenix Vanz")
+    subtitle = models.CharField(max_length=255, blank=True)
+    image = models.ImageField(upload_to="home_slides/")
+    mobile_image = models.ImageField(
+        upload_to="home_slides/mobile/",
+        blank=True,
+        null=True,
+        help_text="Optional portrait or mobile-specific image.",
+    )
+    button_text = models.CharField(max_length=80, blank=True)
+    button_url = models.CharField(
+        max_length=500,
+        blank=True,
+        help_text="Use a relative path such as /shop/roof-racks or a full URL.",
+    )
+    display_order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    starts_at = models.DateTimeField(blank=True, null=True)
+    ends_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ("display_order", "id")
+
+    def __str__(self):
+        return self.title
+
+    @property
+    def is_current(self):
+        now = timezone.now()
+        if not self.is_active:
+            return False
+        if self.starts_at and self.starts_at > now:
+            return False
+        if self.ends_at and self.ends_at < now:
+            return False
+        return True

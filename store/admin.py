@@ -3,7 +3,7 @@ from django.utils.html import format_html
 from django.contrib import admin
 from .models import (
     Product, Category, ProductImage, CategoryImage,
-    ProductOption, ProductOptionGroup, Review
+    ProductOption, ProductOptionGroup, Review, HomeSlide
 )
 
 # --- INLINE ADMIN CLASSES ---
@@ -86,3 +86,40 @@ class ReviewAdmin(admin.ModelAdmin):
     list_display = ['name', 'created_at']
     search_fields = ['name', 'content']
     ordering = ['-created_at']
+
+@admin.register(HomeSlide)
+class HomeSlideAdmin(admin.ModelAdmin):
+    list_display = [
+        "title",
+        "display_order",
+        "is_active",
+        "starts_at",
+        "ends_at",
+        "image_preview",
+    ]
+    list_editable = ["display_order", "is_active"]
+    list_filter = ["is_active", "starts_at", "ends_at"]
+    search_fields = ["title", "subtitle"]
+    ordering = ["display_order", "id"]
+
+    fieldsets = (
+        (None, {"fields": ("title", "subtitle", "image", "mobile_image")}),
+        (
+            "Call to action",
+            {"fields": ("button_text", "button_url")},
+        ),
+        (
+            "Publishing",
+            {"fields": ("display_order", "is_active", "starts_at", "ends_at")},
+        ),
+    )
+
+    def image_preview(self, obj):
+        if obj.image:
+            return format_html(
+                '<img src="{}" width="90" height="50" style="object-fit:cover;border-radius:4px;" />',
+                obj.image.url,
+            )
+        return "-"
+
+    image_preview.short_description = "Preview"
