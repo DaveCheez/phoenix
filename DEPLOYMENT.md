@@ -104,3 +104,20 @@ python manage.py runserver
 Django 4.1 is retained for the lowest-risk redeployment, but it is no longer a
 supported release line. After the site is stable, plan and test an upgrade to a
 currently supported Django LTS release in a separate branch.
+
+## Backlog feature migration (cart quantities and homepage slides)
+
+This revision adds the following database migrations:
+
+```text
+cart/0002_cartitem_constraints_and_timestamps.py
+store/0025_homeslide.py
+```
+
+The existing DigitalOcean `migrate` pre-deploy job applies both automatically.
+The cart migration merges duplicate product rows before adding the unique
+constraint, so it is safe for the existing Neon database.
+
+After deployment, add slideshow entries under **Store > Home slides** in Django
+admin. If there are no active entries, the frontend continues to use its local
+fallback images.
