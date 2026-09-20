@@ -51,7 +51,6 @@ INSTALLED_APPS = [
     "cart",
     "storages",
     "store",
-    "orders",
 ]
 
 MIDDLEWARE = [
@@ -165,6 +164,3 @@ SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
-
-STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
-STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
