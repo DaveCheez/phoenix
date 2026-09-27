@@ -146,6 +146,7 @@ def optimise_uploaded_image(
     filename = f"{safe_prefix}-{uuid4().hex[:12]}.webp"
 
     content = ContentFile(encoded, name=filename)
+    content.content_type = "image/webp"
 
     return OptimisedImage(
         content=content,
