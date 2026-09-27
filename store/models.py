@@ -2,6 +2,7 @@ from django.db import models
 from django.urls import reverse
 from django.conf import settings
 from django.utils import timezone
+from .image_processing import optimise_uploaded_image
 
 
 
@@ -159,6 +160,80 @@ class HomeSlide(models.Model):
     ends_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    def _optimise_new_upload(
+        self,
+        field_name,
+        *,
+        max_width,
+        max_height,
+        target_bytes,
+        quality,
+        minimum_quality,
+        filename_prefix,
+    ):
+        """
+        Optimise a newly assigned image.
+
+        Existing committed files are left untouched, so changing the title,
+        display order or publishing dates does not repeatedly recompress them.
+        """
+        field_file = getattr(self, field_name)
+
+        if not field_file:
+            return False
+
+        if getattr(field_file, "_committed", True):
+            return False
+
+        result = optimise_uploaded_image(
+            field_file.file,
+            max_width=max_width,
+            max_height=max_height,
+            quality=quality,
+            minimum_quality=minimum_quality,
+            target_bytes=target_bytes,
+            filename_prefix=filename_prefix,
+        )
+
+        setattr(self, field_name, result.content)
+        return True
+
+    def save(self, *args, **kwargs):
+        processed_fields = set()
+
+        desktop_processed = self._optimise_new_upload(
+            "image",
+            max_width=1920,
+            max_height=1200,
+            target_bytes=550_000,
+            quality=82,
+            minimum_quality=62,
+            filename_prefix="home-slide",
+        )
+
+        if desktop_processed:
+            processed_fields.add("image")
+
+        mobile_processed = self._optimise_new_upload(
+            "mobile_image",
+            max_width=900,
+            max_height=1600,
+            target_bytes=300_000,
+            quality=80,
+            minimum_quality=60,
+            filename_prefix="home-slide-mobile",
+        )
+
+        if mobile_processed:
+            processed_fields.add("mobile_image")
+
+        # Preserve explicitly supplied update_fields while ensuring newly
+        # processed image fields are included in the database update.
+        if processed_fields and kwargs.get("update_fields") is not None:
+            kwargs["update_fields"] = set(kwargs["update_fields"]) | processed_fields
+
+        super().save(*args, **kwargs)
 
     class Meta:
         ordering = ("display_order", "id")
