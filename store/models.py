@@ -121,6 +121,56 @@ class CategoryImage(models.Model):
         default=''
     )
 
+    def _optimisation_settings(self):
+        """
+        Return image limits appropriate to the category image's purpose.
+
+        Header images retain more resolution for large category-page displays.
+        Thumbnail and unspecified images use smaller limits because they are
+        normally displayed as cards or navigation images.
+        """
+        if self.image_type == "header":
+            return {
+                "max_width": 1920,
+                "max_height": 1200,
+                "target_bytes": 500_000,
+                "quality": 82,
+                "minimum_quality": 62,
+                "filename_prefix": "category-header",
+            }
+
+        return {
+            "max_width": 1200,
+            "max_height": 900,
+            "target_bytes": 250_000,
+            "quality": 80,
+            "minimum_quality": 60,
+            "filename_prefix": "category-thumbnail",
+        }
+
+    def save(self, *args, **kwargs):
+        processed_image = False
+
+        if self.image and not getattr(self.image, "_committed", True):
+            settings = self._optimisation_settings()
+
+            result = optimise_uploaded_image(
+                self.image.file,
+                **settings,
+            )
+
+            self.image = result.content
+            processed_image = True
+
+        # Ensure an explicitly supplied update_fields argument does not prevent
+        # a newly assigned and processed image from being saved.
+        if processed_image and kwargs.get("update_fields") is not None:
+            kwargs["update_fields"] = (
+                set(kwargs["update_fields"]) | {"image"}
+            )
+
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.name} ({self.image_type or 'Unspecified'})"
 

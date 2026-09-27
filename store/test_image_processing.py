@@ -55,6 +55,7 @@ class ImageProcessingTests(SimpleTestCase):
         )
 
         self.assertTrue(result.content.name.endswith(".webp"))
+        self.assertEqual(result.content.content_type, "image/webp")
         self.assertLessEqual(result.width, 1920)
         self.assertLessEqual(result.height, 1080)
         self.assertLess(result.byte_size, original_size)
