@@ -22,8 +22,14 @@ CART_ITEM_PAYLOAD_KEYS = {
     "name",
     "product_slug",
     "quantity",
+    "base_unit_price",
+    "options_total",
+    "configured_unit_price",
     "price",
     "line_total",
+    "selected_options",
+    "configuration_signature",
+    "configuration_valid",
     "sku",
     "image",
 }
@@ -288,8 +294,12 @@ class CartConfigurationAPITests(APITestCase):
         self.assertEqual(set(cart.keys()), CART_PAYLOAD_KEYS)
         self.assertEqual(set(item.keys()), CART_ITEM_PAYLOAD_KEYS)
         self.assertNotIn("options", item)
-        self.assertNotIn("selected_options", item)
-        self.assertNotIn("configuration_signature", item)
+        self.assertEqual(item["selected_options"], [])
+        self.assertEqual(item["configuration_signature"], "")
+        self.assertTrue(item["configuration_valid"])
+        self.assertEqual(item["base_unit_price"], "695.00")
+        self.assertEqual(item["options_total"], "0.00")
+        self.assertEqual(item["configured_unit_price"], "695.00")
         self.assertEqual(item["price"], "695.00")
         self.assertEqual(item["line_total"], "1390.00")
         self.assertEqual(cart["total"], "1390.00")

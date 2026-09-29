@@ -6,12 +6,11 @@ from rest_framework.response import Response
 
 from store.models import Product
 
-from .configuration import BLANK_CONFIGURATION_SIGNATURE
+from .exceptions import CartOptionError
 from .models import Cart, CartItem
+from .operations import MAX_CART_QUANTITY, add_product_to_cart
+from .option_selection import reject_browser_prices
 from .services import cart_payload
-
-
-MAX_CART_QUANTITY = 999
 
 
 def _integer(value, *, field_name: str, minimum: int, maximum: int) -> int:
@@ -32,6 +31,13 @@ def _cart_by_id(cart_id, *, lock: bool = False) -> Cart:
     if lock:
         queryset = queryset.select_for_update()
     return queryset.get(id=cart_id)
+
+
+def _option_error(exc: CartOptionError) -> Response:
+    payload = {"success": False, "code": exc.code, "error": exc.error}
+    if exc.errors:
+        payload["errors"] = exc.errors
+    return Response(payload, status=exc.http_status)
 
 
 def _cart_error(exc) -> Response:
@@ -103,6 +109,11 @@ def add_to_cart(request):
         )
 
     try:
+        reject_browser_prices(request.data)
+    except CartOptionError as exc:
+        return _option_error(exc)
+
+    try:
         quantity = _integer(
             request.data.get("quantity", 1),
             field_name="Quantity",
@@ -126,35 +137,14 @@ def add_to_cart(request):
     try:
         with transaction.atomic():
             cart = _cart_by_id(cart_id, lock=True)
-            item = CartItem.objects.filter(
+            _item, created = add_product_to_cart(
                 cart=cart,
                 product=product,
-                configuration_signature=BLANK_CONFIGURATION_SIGNATURE,
-            ).first()
-            created = item is None
-
-            if item is None:
-                item = CartItem(
-                    cart=cart,
-                    product=product,
-                    quantity=quantity,
-                    configuration_signature=BLANK_CONFIGURATION_SIGNATURE,
-                )
-            else:
-                new_quantity = item.quantity + quantity
-                if new_quantity > MAX_CART_QUANTITY:
-                    return Response(
-                        {
-                            "success": False,
-                            "code": "INVALID_QUANTITY",
-                            "error": f"Quantity cannot be greater than {MAX_CART_QUANTITY}",
-                        },
-                        status=status.HTTP_400_BAD_REQUEST,
-                    )
-                item.quantity = new_quantity
-
-            item.save()
-            cart.save(update_fields=["updated_at"])
+                quantity=quantity,
+                raw_options=request.data.get("options"),
+            )
+    except CartOptionError as exc:
+        return _option_error(exc)
     except (Cart.DoesNotExist, ValidationError, ValueError) as exc:
         return _cart_error(exc)
 
