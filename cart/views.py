@@ -6,6 +6,7 @@ from rest_framework.response import Response
 
 from store.models import Product
 
+from .configuration import BLANK_CONFIGURATION_SIGNATURE
 from .models import Cart, CartItem
 from .services import cart_payload
 
@@ -125,11 +126,20 @@ def add_to_cart(request):
     try:
         with transaction.atomic():
             cart = _cart_by_id(cart_id, lock=True)
-            item = CartItem.objects.filter(cart=cart, product=product).first()
+            item = CartItem.objects.filter(
+                cart=cart,
+                product=product,
+                configuration_signature=BLANK_CONFIGURATION_SIGNATURE,
+            ).first()
             created = item is None
 
             if item is None:
-                item = CartItem(cart=cart, product=product, quantity=quantity)
+                item = CartItem(
+                    cart=cart,
+                    product=product,
+                    quantity=quantity,
+                    configuration_signature=BLANK_CONFIGURATION_SIGNATURE,
+                )
             else:
                 new_quantity = item.quantity + quantity
                 if new_quantity > MAX_CART_QUANTITY:
