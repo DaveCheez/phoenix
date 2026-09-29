@@ -2,6 +2,7 @@ from rest_framework import serializers
 
 from .models import (
     Category,
+    Enquiry,
     HomeSlide,
     Product,
     ProductImage,
@@ -150,3 +151,67 @@ class HomeSlideSerializer(serializers.ModelSerializer):
 
     def get_mobile_image(self, obj):
         return absolute_image_url(self.context.get("request"), obj.mobile_image)
+
+
+class ContactEnquirySerializer(serializers.ModelSerializer):
+    website = serializers.CharField(
+        write_only=True,
+        required=False,
+        allow_blank=True,
+        max_length=200,
+    )
+    phone = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=50,
+        trim_whitespace=True,
+    )
+    source_url = serializers.URLField(
+        required=False,
+        allow_blank=True,
+        max_length=500,
+    )
+
+    class Meta:
+        model = Enquiry
+        fields = [
+            "name",
+            "email",
+            "phone",
+            "message",
+            "source_url",
+            "website",
+        ]
+        extra_kwargs = {
+            "name": {"max_length": 120, "trim_whitespace": True},
+            "email": {"trim_whitespace": True},
+            "message": {"max_length": 5000, "trim_whitespace": True},
+        }
+
+    def to_internal_value(self, data):
+        if hasattr(data, "keys"):
+            unknown = set(data.keys()) - set(self.fields)
+            if unknown:
+                raise serializers.ValidationError(
+                    {
+                        field: ["This field is not supported."]
+                        for field in sorted(unknown)
+                    }
+                )
+        return super().to_internal_value(data)
+
+    def validate_website(self, value):
+        if value:
+            raise serializers.ValidationError("This field must be empty.")
+        return value
+
+    def validate_name(self, value):
+        if "\r" in value or "\n" in value:
+            raise serializers.ValidationError(
+                "Name cannot contain line breaks."
+            )
+        return value
+
+    def create(self, validated_data):
+        validated_data.pop("website", None)
+        return Enquiry.objects.create(**validated_data)
