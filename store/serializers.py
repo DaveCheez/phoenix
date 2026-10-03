@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 
 from .models import (
@@ -11,6 +13,13 @@ from .models import (
 )
 
 
+def money(value):
+    """Return a stable two-decimal currency string for API responses."""
+    if value is None:
+        value = Decimal("0.00")
+    return format(Decimal(value).quantize(Decimal("0.01")), ".2f")
+
+
 def absolute_image_url(request, image_field):
     if not image_field:
         return None
@@ -22,17 +31,45 @@ def absolute_image_url(request, image_field):
 
 
 class ProductOptionSerializer(serializers.ModelSerializer):
+    price_adjustment = serializers.SerializerMethodField()
+    price = serializers.SerializerMethodField()
+
     class Meta:
         model = ProductOption
-        fields = ["id", "name", "price", "sku"]
+        fields = [
+            "id",
+            "name",
+            "price_adjustment",
+            "price",
+            "sku",
+            "is_default",
+            "display_order",
+        ]
+
+    def get_price_adjustment(self, obj):
+        return money(obj.price_adjustment)
+
+    def get_price(self, obj):
+        return money(obj.price_adjustment)
 
 
 class ProductOptionGroupSerializer(serializers.ModelSerializer):
-    options = ProductOptionSerializer(many=True, read_only=True)
+    options = serializers.SerializerMethodField()
 
     class Meta:
         model = ProductOptionGroup
-        fields = ["id", "name", "required", "options"]
+        fields = ["id", "name", "required", "help_text", "display_order", "options"]
+
+    def get_options(self, obj):
+        prefetch_cache = getattr(obj, "_prefetched_objects_cache", None) or {}
+        if "options" in prefetch_cache:
+            options = prefetch_cache["options"]
+        else:
+            options = obj.options.filter(
+                active=True,
+                group__isnull=False,
+            ).order_by("display_order", "id")
+        return ProductOptionSerializer(options, many=True).data
 
 
 class ProductImageSerializer(serializers.ModelSerializer):
@@ -47,7 +84,7 @@ class ProductImageSerializer(serializers.ModelSerializer):
 
 
 class ProductSerializer(serializers.ModelSerializer):
-    option_groups = ProductOptionGroupSerializer(many=True, read_only=True)
+    option_groups = serializers.SerializerMethodField()
     productimage_set = ProductImageSerializer(many=True, read_only=True)
 
     class Meta:
@@ -61,6 +98,21 @@ class ProductSerializer(serializers.ModelSerializer):
             "option_groups",
             "productimage_set",
         ]
+
+    def get_option_groups(self, obj):
+        prefetch_cache = getattr(obj, "_prefetched_objects_cache", None) or {}
+        if "option_groups" in prefetch_cache:
+            groups = prefetch_cache["option_groups"]
+        else:
+            groups = obj.option_groups.filter(active=True).order_by(
+                "display_order",
+                "id",
+            )
+        return ProductOptionGroupSerializer(
+            groups,
+            many=True,
+            context=self.context,
+        ).data
 
 
 class CategorySerializer(serializers.ModelSerializer):

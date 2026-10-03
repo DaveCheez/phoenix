@@ -1,9 +1,9 @@
-from django.db.models import Q
+from django.db.models import Prefetch, Q
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
 from rest_framework import generics
 
-from .models import Category, HomeSlide, Product, Review
+from .models import Category, HomeSlide, Product, ProductOption, ProductOptionGroup, Review
 from .serializers import (
     CategorySerializer,
     CategoryWithProductsSerializer,
@@ -61,7 +61,20 @@ class ProductListAPI(generics.ListAPIView):
 class ProductDetailAPI(generics.RetrieveAPIView):
     queryset = Product.objects.prefetch_related(
         "productimage_set",
-        "option_groups__options",
+        Prefetch(
+            "option_groups",
+            queryset=ProductOptionGroup.objects.filter(active=True)
+            .order_by("display_order", "id")
+            .prefetch_related(
+                Prefetch(
+                    "options",
+                    queryset=ProductOption.objects.filter(
+                        active=True,
+                        group__isnull=False,
+                    ).order_by("display_order", "id"),
+                )
+            ),
+        ),
     )
     serializer_class = ProductSerializer
     lookup_field = "slug"

@@ -1,6 +1,10 @@
 import nested_admin
-from django.utils.html import format_html
+from django import forms
 from django.contrib import admin
+from django.core.exceptions import ValidationError
+from django.utils.html import format_html
+from nested_admin.formsets import NestedInlineFormSet
+
 from .models import (
     Product, Category, ProductImage, CategoryImage,
     ProductOption, ProductOptionGroup, Review, HomeSlide
@@ -8,15 +12,40 @@ from .models import (
 
 # --- INLINE ADMIN CLASSES ---
 
+class ProductOptionInlineFormSet(NestedInlineFormSet):
+    def clean(self):
+        super().clean()
+        if any(self.errors):
+            return
+        default_count = 0
+        for form in self.forms:
+            if not form.cleaned_data or form.cleaned_data.get("DELETE"):
+                continue
+            if form.cleaned_data.get("is_default"):
+                default_count += 1
+        if default_count > 1:
+            raise ValidationError("Only one default option is allowed per group.")
+
+
 class ProductOptionInline(nested_admin.NestedTabularInline):
     model = ProductOption
     extra = 1
+    formset = ProductOptionInlineFormSet
+    fields = [
+        "name",
+        "price_adjustment",
+        "sku",
+        "is_default",
+        "display_order",
+        "active",
+    ]
 
 
 class ProductOptionGroupInline(nested_admin.NestedStackedInline):
     model = ProductOptionGroup
     inlines = [ProductOptionInline]
     extra = 1
+    fields = ["name", "required", "active", "display_order", "help_text"]
 
 
 class ProductImageInline(nested_admin.NestedTabularInline):
@@ -50,12 +79,50 @@ class CategoryAdmin(admin.ModelAdmin):
 
 @admin.register(ProductOptionGroup)
 class ProductOptionGroupAdmin(admin.ModelAdmin):
-    list_display = ['name', 'product', 'required']
+    list_display = ["name", "product", "required", "active", "display_order"]
+    list_filter = ["required", "active", "product"]
+    search_fields = ["name", "product__name"]
+    ordering = ["display_order", "id"]
+    fields = ["product", "name", "required", "active", "display_order", "help_text"]
+
+
+class ProductOptionAdminForm(forms.ModelForm):
+    class Meta:
+        model = ProductOption
+        fields = [
+            "group",
+            "name",
+            "price_adjustment",
+            "sku",
+            "is_default",
+            "display_order",
+            "active",
+        ]
 
 
 @admin.register(ProductOption)
 class ProductOptionAdmin(admin.ModelAdmin):
-    list_display = ['name', 'group', 'price']
+    form = ProductOptionAdminForm
+    list_display = [
+        "name",
+        "group",
+        "price_adjustment",
+        "is_default",
+        "active",
+        "display_order",
+    ]
+    list_filter = ["active", "is_default", "group__product"]
+    search_fields = ["name", "sku", "group__name"]
+    ordering = ["display_order", "id"]
+    fields = [
+        "group",
+        "name",
+        "price_adjustment",
+        "sku",
+        "is_default",
+        "display_order",
+        "active",
+    ]
 
 
 @admin.register(ProductImage)

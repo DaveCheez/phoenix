@@ -1,7 +1,12 @@
+from decimal import Decimal
+
+from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.urls import reverse
-from django.conf import settings
 from django.utils import timezone
+
 from .image_processing import optimise_uploaded_image
 
 
@@ -87,19 +92,69 @@ class ProductOptionGroup(models.Model):
     product = models.ForeignKey(Product, related_name='option_groups', on_delete=models.CASCADE)
     name = models.CharField(max_length=100)  # e.g. Wheelbase, Lights
     required = models.BooleanField(default=False)
+    display_order = models.PositiveIntegerField(default=0)
+    help_text = models.CharField(max_length=255, blank=True)
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ("display_order", "id")
 
     def __str__(self):
         return f"{self.product.name} - {self.name} ({'Required' if self.required else 'Optional'})"
 
 
 class ProductOption(models.Model):
-    group = models.ForeignKey(ProductOptionGroup, related_name='options', on_delete=models.CASCADE, null=True, blank=True)
+    group = models.ForeignKey(
+        ProductOptionGroup,
+        related_name="options",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+    )
     name = models.CharField(max_length=100)  # e.g. MWB, LWB, 2x Lights
-    price = models.DecimalField(max_digits=8, decimal_places=2, default=0.00)
+    price_adjustment = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
     sku = models.CharField(max_length=50, blank=True, null=True)
+    display_order = models.PositiveIntegerField(default=0)
+    is_default = models.BooleanField(default=False)
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ("display_order", "id")
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(price_adjustment__gte=Decimal("0.00")),
+                name="productoption_price_adjustment_gte_0",
+            ),
+            models.UniqueConstraint(
+                fields=("group",),
+                condition=models.Q(is_default=True) & models.Q(group__isnull=False),
+                name="unique_default_option_per_group",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.price_adjustment is not None and self.price_adjustment < Decimal("0.00"):
+            raise ValidationError(
+                {"price_adjustment": "Price adjustments cannot be negative."}
+            )
+        if self.is_default and self.group_id:
+            qs = ProductOption.objects.filter(group_id=self.group_id, is_default=True)
+            if self.pk:
+                qs = qs.exclude(pk=self.pk)
+            if qs.exists():
+                raise ValidationError(
+                    {"is_default": "Only one default option is allowed per group."}
+                )
 
     def __str__(self):
-        return f"{self.group.name} - {self.name} (£{self.price})"
+        group_name = self.group.name if self.group_id else "Unassigned"
+        return f"{group_name} - {self.name} (+£{self.price_adjustment})"
 
 
 class CategoryImage(models.Model):
