@@ -9,6 +9,31 @@ from django.utils import timezone
 from store.models import Product, ProductOption, ProductOptionGroup
 
 
+class GuestSession(models.Model):
+    """Anonymous checkout credential. Not a customer account or verified email.
+
+    Only the SHA-256 digest of the raw token is stored. The raw token is
+    issued once and is never written here. Expiry and revocation stay on this
+    row so they remain available after the current cart is deleted.
+
+    One guest session has at most one current cart. Later orders may still
+    belong to the same guest session, and one source cart may still produce
+    more than one order. Those order links are not part of this model.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    token_hash = models.CharField(max_length=64, unique=True, editable=False)
+    created_at = models.DateTimeField(editable=False)
+    expires_at = models.DateTimeField(editable=False)
+    revoked_at = models.DateTimeField(null=True, blank=True, editable=False)
+
+    class Meta:
+        ordering = ("-created_at", "-id")
+
+    def __str__(self):
+        return "Guest session"
+
+
 class Cart(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -19,6 +44,14 @@ class Cart(models.Model):
         related_name="carts",
     )
     session_key = models.CharField(max_length=40, null=True, blank=True)
+    guest_session = models.OneToOneField(
+        GuestSession,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        editable=False,
+        related_name="cart",
+    )
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
