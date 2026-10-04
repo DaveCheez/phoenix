@@ -7,6 +7,7 @@ from django.test import TestCase
 from django.urls import reverse
 from rest_framework.test import APITestCase
 
+from cart.guest_access import issue_guest_cart
 from cart.models import Cart, CartItem
 from store.models import Category, Product, ProductOption, ProductOptionGroup
 
@@ -419,11 +420,12 @@ class ExistingApiUnaffectedTests(APITestCase):
         self.assertEqual(payload_option["price"], "85.50")
         self.assertEqual(payload_option["price_adjustment"], "85.50")
 
-        cart = Cart.objects.create(session_key="order-smoke")
+        issued = issue_guest_cart()
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issued.raw_token}")
         add = self.client.post(
             reverse("add_to_cart"),
             {
-                "cart_id": str(cart.id),
+                "cart_id": str(issued.cart.id),
                 "product_id": product.id,
                 "quantity": 1,
                 "options": [option.id],

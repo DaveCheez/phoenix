@@ -50,7 +50,74 @@ customer recovers an order after the credential is gone.
 One guest session may later have more than one order, including more than one
 order from the same source cart. This checkpoint does not add that link.
 
-## What this checkpoint does not do
+## HTTP enforcement
 
-The public cart routes still accept a cart UUID alone. These helpers are not
-wired into HTTP yet.
+On this branch, every cart read and mutation requires the guest bearer.
+`POST /api/cart/create/` with no `Authorization` header and a body of exactly
+`{"action": "start"}` is the only issuance path. It returns `guest_access.token`
+and `guest_access.expires_at` once, with the normal cart payload. Django does
+not set a guest cookie. This Django route is reachable by whoever can call the
+API. It is not a private network endpoint. Nuxt must copy the token into its
+own cookie and remove `guest_access` before any browser JSON is sent.
+
+A missing header without that exact start body returns `400 START_REQUIRED`.
+A present invalid header returns `401`, including when `action` is `start`.
+A valid bearer returns the existing cart with `200` and does not rotate the
+token or move `expires_at`. `action=start` does not replace that session.
+
+`GET`, add, update, remove and clear resolve the cart from the bearer. A
+supplied `cart_id` is only a consistency check. If body and query disagree, or
+the value does not match the session cart, the response is the same `401`.
+An active session with no cart returns `409 GUEST_CART_MISSING`.
+`{"action": "replace_missing"}` with a valid bearer creates one empty cart on
+that same session, or returns the current cart unchanged. It does not rotate,
+extend or revoke the credential, and it does not clear an existing basket.
+
+Failed guest access is `401` with `WWW-Authenticate: Bearer realm="cart"` and
+`Cache-Control: no-store`. The body is `CART_ACCESS_UNAVAILABLE`. Database
+availability failures are `503 CART_TEMPORARILY_UNAVAILABLE`. Validation and
+conflict errors stay their existing responses after the bearer has been
+accepted. A programming error is not turned into `503`.
+
+The scheme name is case-insensitive. The token is not trimmed or lowercased.
+Django sees one `HTTP_AUTHORIZATION` string. A comma-joined duplicate is
+rejected. A web server that keeps only one of two raw duplicate headers does
+not show the discarded value to this process.
+
+Clear deletes items only. Reads do not extend expiry. Add is not idempotent:
+a response can be lost after the commit, and repeating Add can insert another
+quantity. Token expiry and revocation reject later requests. They do not
+delete the stored cart or session rows.
+
+The current production storefront still sends a `localStorage` cart id and
+will not satisfy this contract. Do not deploy this branch until the matching
+Nuxt change and the abuse limits below are in place. The basket cutover
+decision is already approved.
+
+## Release gates
+
+Nuxt must remove issuance credentials before browser JSON. Browser CSRF needs
+a value bound to this guest session. Rotating two unrelated cookies is not
+that binding. The no-session start and the later reset both need an explicit
+CSRF treatment. Origin checks must use the trusted configured site origins,
+with apex and `www` treated as different origins when both serve the shop.
+
+There is no browser `HttpOnly` cookie compare-and-set. Two tabs can both start
+before either cookie is stored, and an in-process Nuxt map does not coordinate
+multiple Nuxt instances. Concurrent starts have to be coordinated before
+issuance. A mutation must not be replayed after an uncertain failure.
+
+A limiter that only wraps Nuxt does not cover a direct call to this public
+Django start route. Rate limits and a trusted client address, not
+`REMOTE_ADDR` behind Nuxt and not a client-supplied forwarded-IP list, are
+still required before release. This checkpoint does not add those limits or a
+new shared cache.
+
+The business owner has approved the basket cutover. Historical anonymous
+carts remain stored and unbound. There is no UUID-based claim and no
+ownership backfill. A customer explicitly starts a new empty basket. There
+is no silent reset or deletion.
+
+Rolling this enforcement back reopens UUID-only access to
+carts that already have guest sessions, so a rollback has to be an explicit
+security decision rather than a quiet restore of the old routes.

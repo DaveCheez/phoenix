@@ -8,6 +8,7 @@ from rest_framework.test import APITestCase
 
 from store.models import Category, Product, ProductOption, ProductOptionGroup
 
+from .guest_access import issue_guest_cart
 from .models import Cart, CartItem, CartItemOption
 
 
@@ -36,7 +37,9 @@ class CartOptionPricingTests(APITestCase):
             slug="side-steps-pricing",
             price=Decimal("420.00"),
         )
-        self.cart = Cart.objects.create(session_key="pricing-session")
+        issued = issue_guest_cart()
+        self.cart = issued.cart
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issued.raw_token}")
         self.add_url = reverse("add_to_cart")
 
         self.wheelbase = ProductOptionGroup.objects.create(
@@ -517,7 +520,7 @@ class CartOptionPricingTests(APITestCase):
             {"cart_id": str(other.id), "item_id": item_id, "quantity": 9},
             format="json",
         )
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 401)
         self.assertEqual(CartItem.objects.get().quantity, 1)
 
     def test_empty_options_object_is_rejected(self):

@@ -56,6 +56,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "cart.middleware.CartNoStoreMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -135,6 +136,11 @@ SITE_URL = config(
 ).rstrip("/")
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# HTTP_AUTHORIZATION and HTTP_COOKIE do not match Django's default sensitive-key
+# list, and cookie values are printed separately from request META.
+DEFAULT_EXCEPTION_REPORTER_FILTER = "cart.credential_reporting.CartExceptionReporterFilter"
+DEFAULT_EXCEPTION_REPORTER = "cart.credential_reporting.CartExceptionReporter"
 
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = csv_setting(

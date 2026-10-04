@@ -1,8 +1,8 @@
 """Internal guest-cart credentials.
 
-This module does not secure the existing cart HTTP routes. Those routes still
-authorise a caller who knows the cart UUID. Wiring these helpers into the
-views is a later checkpoint.
+Cart views use these helpers. A cart UUID, Django session, or guest-session
+UUID is not a credential. The raw token is accepted only from the
+Authorization header by the HTTP layer.
 
 Token format:
 ``secrets.token_urlsafe(32)`` produces 43 case-sensitive characters from
@@ -36,7 +36,7 @@ import secrets
 from datetime import timedelta
 
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .models import Cart, GuestSession
@@ -150,6 +150,30 @@ def revoke_guest_session(*, raw_token):
             guest_session.revoked_at = timezone.now()
             guest_session.save(update_fields=["revoked_at"])
     return guest_session
+
+
+def replace_missing_guest_cart(*, raw_token):
+    """Return this session's cart, creating an empty one only when it has none.
+
+    The session row is locked and rechecked before the cart is read. An
+    existing cart is returned unchanged, including its lines. The token,
+    expiry and revocation state are not modified, and no caller-selected
+    cart is attached.
+    """
+    with transaction.atomic():
+        guest_session = get_guest_session(raw_token=raw_token, for_update=True)
+        cart = _session_cart(guest_session, for_update=True)
+        if cart is not None:
+            return cart, False
+        try:
+            with transaction.atomic():
+                cart = Cart.objects.create(guest_session=guest_session)
+        except IntegrityError:
+            cart = _session_cart(guest_session, for_update=True)
+            if cart is None:
+                raise
+            return cart, False
+        return cart, True
 
 
 def _new_raw_token():

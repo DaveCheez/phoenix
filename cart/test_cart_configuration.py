@@ -13,6 +13,7 @@ from store.models import Category, Product, ProductOption, ProductOptionGroup
 
 from .configuration import BLANK_CONFIGURATION_SIGNATURE, build_configuration_signature
 from .admin import CartItemAdmin, CartItemOptionAdmin, CartItemOptionInline
+from .guest_access import issue_guest_cart
 from .models import Cart, CartItem, CartItemOption
 
 
@@ -211,7 +212,9 @@ class CartConfigurationAPITests(APITestCase):
             slug="retro-roof-rack",
             price=Decimal("695.00"),
         )
-        self.cart = Cart.objects.create(session_key="api-config-session")
+        issued = issue_guest_cart()
+        self.cart = issued.cart
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issued.raw_token}")
         self.add_url = reverse("add_to_cart")
 
     def _add(self, extra=None, quantity=1):

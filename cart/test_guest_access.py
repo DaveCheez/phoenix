@@ -283,7 +283,11 @@ class GuestSessionAdminTests(TestCase):
 class GuestSessionPublicCartTests(APITestCase):
     def test_existing_cart_response_has_no_credential_fields(self):
         issued = issue_guest_cart()
-        response = self.client.get(reverse("get_cart"), {"cart_id": str(issued.cart.id)})
+        denied = self.client.get(reverse("get_cart"), {"cart_id": str(issued.cart.id)})
+        self.assertEqual(denied.status_code, 401)
+
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issued.raw_token}")
+        response = self.client.get(reverse("get_cart"))
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(

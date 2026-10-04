@@ -5,6 +5,7 @@ from rest_framework.test import APITestCase
 
 from store.models import Category, Product
 
+from .guest_access import issue_guest_cart
 from .models import Cart, CartItem
 
 
@@ -21,7 +22,9 @@ class CartAPITests(APITestCase):
             slug="retro-roof-rack",
             price=Decimal("695.00"),
         )
-        self.cart = Cart.objects.create(session_key="test-session")
+        issued = issue_guest_cart()
+        self.cart = issued.cart
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issued.raw_token}")
 
     def test_adding_same_product_increases_quantity(self):
         url = reverse("add_to_cart")
@@ -102,7 +105,7 @@ class CartAPITests(APITestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 401)
         item.refresh_from_db()
         self.assertEqual(item.quantity, 1)
 
