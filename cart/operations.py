@@ -2,11 +2,10 @@ import logging
 
 from django.db import IntegrityError, transaction
 
-from .configuration import BLANK_CONFIGURATION_SIGNATURE, build_configuration_signature
+from .configuration import build_configuration_signature
 from .exceptions import CartOptionError
 from .models import CartItem, CartItemOption
 from .option_selection import (
-    LEGACY_BLANK,
     configuration_signature_for_options,
     parse_requested_options,
     validate_product_options,
@@ -19,9 +18,6 @@ MAX_CART_QUANTITY = 999
 
 def add_product_to_cart(*, cart, product, quantity, raw_options):
     requested = parse_requested_options(raw_options)
-    if requested is LEGACY_BLANK:
-        return _add_legacy_blank_line(cart=cart, product=product, quantity=quantity)
-
     resolved = validate_product_options(product, requested)
     signature = configuration_signature_for_options(resolved)
     return _add_configured_line(
@@ -30,18 +26,6 @@ def add_product_to_cart(*, cart, product, quantity, raw_options):
         quantity=quantity,
         signature=signature,
         resolved=resolved,
-    )
-
-
-def _add_legacy_blank_line(*, cart, product, quantity):
-    """Preserve pre-option add-to-cart: merge the blank-signature line only."""
-    return _increment_or_create(
-        cart=cart,
-        product=product,
-        quantity=quantity,
-        signature=BLANK_CONFIGURATION_SIGNATURE,
-        resolved=(),
-        persist_options=False,
     )
 
 
