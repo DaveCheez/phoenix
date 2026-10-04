@@ -332,14 +332,40 @@ class CartOptionPricingTests(APITestCase):
         self.assertEqual(item["price"], "845.00")
         self.assertFalse(item["configuration_valid"])
 
-    def test_legacy_line_missing_required_group_is_invalid(self):
-        response = self._add(options={"Wheelbase": self.lwb.id})
-        self.assertEqual(response.status_code, 201)
-        item = response.data["cart"]["items"][0]
-        self.assertEqual(item["configuration_signature"], "")
-        self.assertEqual(item["selected_options"], [])
-        self.assertEqual(item["price"], "695.00")
-        self.assertFalse(item["configuration_valid"])
+    def test_stored_blank_line_missing_required_group_is_invalid(self):
+        item = CartItem.objects.create(
+            cart=self.cart,
+            product=self.product,
+            quantity=2,
+            configuration_signature="",
+        )
+        updated_at = item.updated_at
+
+        response = self.client.get(
+            reverse("get_cart"),
+            {"cart_id": str(self.cart.id)},
+        )
+        payload = response.data["cart"]["items"][0]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["configuration_signature"], "")
+        self.assertEqual(payload["selected_options"], [])
+        self.assertEqual(payload["price"], "695.00")
+        self.assertEqual(payload["quantity"], 2)
+        self.assertFalse(payload["configuration_valid"])
+
+        item.refresh_from_db()
+        self.assertEqual(item.updated_at, updated_at)
+        self.assertEqual(item.quantity, 2)
+        self.assertEqual(item.configuration_signature, "")
+        self.assertFalse(item.selected_options.exists())
+
+        removed = self.client.delete(
+            reverse("remove_from_cart"),
+            {"cart_id": str(self.cart.id), "item_id": item.id},
+            format="json",
+        )
+        self.assertEqual(removed.status_code, 200)
+        self.assertFalse(CartItem.objects.filter(id=item.id).exists())
 
     def test_signature_mismatch_marks_line_invalid(self):
         item = CartItem.objects.create(
@@ -494,27 +520,52 @@ class CartOptionPricingTests(APITestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(CartItem.objects.get().quantity, 1)
 
-    def test_legacy_object_is_accepted_and_ignored(self):
-        response = self._add(
-            options={"Wheelbase": [self.lwb.id], "Lights": None},
-        )
-        self.assertEqual(response.status_code, 201)
-        item = CartItem.objects.get()
-        self.assertEqual(item.configuration_signature, "")
+    def test_empty_options_object_is_rejected(self):
+        response = self._add(options={})
+        self._assert_invalid_options_object(response)
+        self.assertFalse(CartItem.objects.exists())
         self.assertFalse(CartItemOption.objects.exists())
-        self.assertEqual(response.data["cart"]["items"][0]["price"], "695.00")
 
-    def test_legacy_blank_requests_still_merge(self):
-        self._add(options={"Wheelbase": self.mwb.id})
-        response = self._add(extra={})
+    def test_populated_legacy_object_is_rejected(self):
+        response = self._add(
+            options={"3": 11, "4": [self.lwb.id], "5": None},
+        )
+        self._assert_invalid_options_object(response)
+        self.assertFalse(CartItem.objects.exists())
+        self.assertFalse(CartItemOption.objects.exists())
+
+    def test_rejected_object_does_not_increment_existing_lines(self):
+        configured = self._add(options=[self.lwb.id])
+        blank = self._add(product=self.plain_product, options=[])
+        self.assertEqual(configured.status_code, 201)
+        self.assertEqual(blank.status_code, 201)
+        configured_item = CartItem.objects.get(product=self.product)
+        blank_item = CartItem.objects.get(product=self.plain_product)
+        option_count = CartItemOption.objects.count()
+
+        for payload in ({}, {"3": 11, "4": [20], "5": None}):
+            with self.subTest(options=payload):
+                against_configured = self._add(options=payload)
+                against_blank = self._add(product=self.plain_product, options=payload)
+                self._assert_invalid_options_object(against_configured)
+                self._assert_invalid_options_object(against_blank)
+
+        configured_item.refresh_from_db()
+        blank_item.refresh_from_db()
+        self.assertEqual(CartItem.objects.count(), 2)
+        self.assertEqual(configured_item.quantity, 1)
+        self.assertEqual(blank_item.quantity, 1)
+        self.assertEqual(CartItemOption.objects.count(), option_count)
+
+    def _assert_invalid_options_object(self, response):
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.data["code"], "MISSING_REQUIRED_OPTION")
-        first = self._add(product=self.plain_product, extra={"options": {"ignored": 1}})
-        second = self._add(product=self.plain_product, extra={"options": {"ignored": 2}})
-        self.assertEqual(first.status_code, 201)
-        self.assertEqual(second.status_code, 200)
-        self.assertEqual(CartItem.objects.filter(product=self.plain_product).count(), 1)
-        self.assertEqual(CartItem.objects.get(product=self.plain_product).quantity, 2)
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(response.data["code"], "INVALID_OPTIONS_FORMAT")
+        self.assertEqual(
+            response.data["error"],
+            "Your product selections could not be read. "
+            "Refresh the product page and select your options again.",
+        )
 
     def test_invalid_options_type_is_rejected(self):
         response = self._add(extra={"options": "11,20"})

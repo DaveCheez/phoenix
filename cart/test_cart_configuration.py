@@ -304,7 +304,7 @@ class CartConfigurationAPITests(APITestCase):
         self.assertEqual(item["line_total"], "1390.00")
         self.assertEqual(cart["total"], "1390.00")
 
-    def test_frontend_options_object_is_ignored(self):
+    def test_frontend_options_object_is_rejected(self):
         response = self._add(
             extra={
                 "options": {
@@ -313,12 +313,16 @@ class CartConfigurationAPITests(APITestCase):
                 }
             }
         )
-        self.assertEqual(response.status_code, 201)
-        self.assertTrue(response.data["created"])
-        item = CartItem.objects.get()
-        self.assertEqual(item.configuration_signature, "")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(response.data["code"], "INVALID_OPTIONS_FORMAT")
+        self.assertEqual(
+            response.data["error"],
+            "Your product selections could not be read. "
+            "Refresh the product page and select your options again.",
+        )
+        self.assertFalse(CartItem.objects.exists())
         self.assertFalse(CartItemOption.objects.exists())
-        self.assertEqual(response.data["cart"]["items"][0]["price"], "695.00")
 
 
 class CartAdminInspectionTests(TestCase):

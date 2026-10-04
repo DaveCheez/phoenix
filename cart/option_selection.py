@@ -1,9 +1,7 @@
 """Validate selected product options for add-to-cart.
 
-Legacy compatibility: the currently deployed frontend posts `options` as a JSON
-object of mixed scalar/array/null values. That object is treated as a blank
-configuration (signature "") and must not be interpreted. Remove this branch
-when the frontend sends a flat list of option IDs.
+`options` must be omitted, JSON null, or a flat list of positive option IDs.
+JSON objects are rejected and must not be interpreted.
 """
 
 from decimal import Decimal
@@ -30,7 +28,10 @@ FORBIDDEN_PRICE_FIELDS = (
     "balance",
 )
 
-LEGACY_BLANK = object()
+INVALID_OPTIONS_FORMAT_ERROR = (
+    "Your product selections could not be read. "
+    "Refresh the product page and select your options again."
+)
 
 
 def reject_browser_prices(payload):
@@ -43,16 +44,13 @@ def reject_browser_prices(payload):
 
 
 def parse_requested_options(raw_options):
-    """Return LEGACY_BLANK or a list of strict option IDs."""
+    """Return a list of strict option IDs. Omitted or null options become []."""
     if raw_options is None:
         return []
-    if isinstance(raw_options, dict):
-        # LEGACY: ignore the old frontend object and use a blank configuration.
-        return LEGACY_BLANK
     if not isinstance(raw_options, list):
         raise CartOptionError(
             "INVALID_OPTIONS_FORMAT",
-            "Selected options must be a list of option IDs.",
+            INVALID_OPTIONS_FORMAT_ERROR,
         )
     return parse_strict_option_ids(raw_options)
 
