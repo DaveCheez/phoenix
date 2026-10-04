@@ -73,6 +73,7 @@ class OrderAdmin(admin.ModelAdmin):
         "outstanding_balance",
         "payment_status",
         "job_status",
+        "is_finalised",
     ]
     list_filter = ["payment_status", "job_status", "created_at"]
     search_fields = ["reference", "customer_name", "customer_email"]
@@ -106,6 +107,7 @@ class OrderAdmin(admin.ModelAdmin):
         "payment_terms_text",
         "payment_status",
         "job_status",
+        "is_finalised",
         "source_cart",
     ]
     fields = readonly_fields + ["internal_notes"]

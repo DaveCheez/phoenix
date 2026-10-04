@@ -5,6 +5,7 @@ This module is not a public API and is not a production seeding command.
 
 from decimal import Decimal
 
+from cart.configuration import build_configuration_signature
 from store.models import Category, Product, ProductOption, ProductOptionGroup
 
 from .models import Order, OrderItem, OrderItemOption
@@ -60,7 +61,7 @@ def build_catalogue():
     }
 
 
-def create_snapshot_order(*, full_total=None, quantity=1, source_cart=None, **order_overrides):
+def create_snapshot_order(*, quantity=1, source_cart=None, finalise=True, **order_overrides):
     catalogue = build_catalogue()
     product = catalogue["product"]
     lwb = catalogue["lwb"]
@@ -70,7 +71,7 @@ def create_snapshot_order(*, full_total=None, quantity=1, source_cart=None, **or
     options_total = lwb.price_adjustment + no_lights.price_adjustment
     configured_unit_price = base_unit_price + options_total
     line_total = configured_unit_price * quantity
-    total = full_total if full_total is not None else line_total
+    total = line_total
     split = calculate_deposit(total)
 
     defaults = {
@@ -97,9 +98,7 @@ def create_snapshot_order(*, full_total=None, quantity=1, source_cart=None, **or
         product_name=product.name,
         product_slug=product.slug,
         sku="",
-        configuration_signature=f"{lwb.id},{no_lights.id}"
-        if lwb.id < no_lights.id
-        else f"{no_lights.id},{lwb.id}",
+        configuration_signature=build_configuration_signature([lwb.id, no_lights.id]),
         quantity=quantity,
         base_unit_price=base_unit_price,
         options_total=options_total,
@@ -130,4 +129,6 @@ def create_snapshot_order(*, full_total=None, quantity=1, source_cart=None, **or
         option_sku=no_lights.sku,
         price_adjustment=Decimal("0.00"),
     )
+    if finalise:
+        order = order._mark_finalised()
     return order, catalogue

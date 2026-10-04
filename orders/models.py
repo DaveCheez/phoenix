@@ -5,10 +5,17 @@ These models store names, prices and terms as they were at creation. Ordinary
 
 Limits of this protection:
 - ``Model.save()`` and ``full_clean()`` reject ordinary edits to snapshot
-  fields.
-- ``QuerySet.update()``, raw SQL and database shells are not intercepted.
+  fields, including ``is_finalised``.
+- ``is_finalised`` means the commercial snapshot is complete. It does not
+  mean the order is paid, accepted for production, fitted or completed.
+- Child inserts and deletes of a finalised snapshot are rejected when they
+  go through ``save()``, ``delete()`` or the orders ``pre_delete`` signal.
+- ``QuerySet.update()``, ``bulk_create()``, ``bulk_update()``, raw SQL and
+  database shells are not intercepted. This is not database-level immutability.
+- ``_mark_finalised()`` is the only application path that may set
+  ``is_finalised``. Repeated calls return the existing row unchanged.
 - Later payment work must use a dedicated, audited service for
-  ``amount_paid`` and payment status. Do not add a generic bypass flag here.
+  ``amount_paid`` and payment status.
 """
 
 import uuid
@@ -16,9 +23,12 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
-from django.db import models
-from django.db.models import F, Q
+from django.db import models, transaction
+from django.db.models import BigIntegerField, F, Q
+from django.db.models.functions import Cast, Round
+from django.db.models.lookups import Exact
 
+from cart.configuration import build_configuration_signature
 from cart.models import Cart
 from store.models import Product, ProductOption, ProductOptionGroup
 
@@ -27,6 +37,19 @@ from .money import OrderMoneyError, calculate_deposit
 
 MONEY = dict(max_digits=12, decimal_places=2)
 MAX_ORDER_QUANTITY = 999
+
+
+def _whole_pennies(field_name):
+    """One stored money column as whole pennies.
+
+    Multiply by 100 before rounding, then cast. Truncating the pound amount
+    first would drop a fractional penny. BigIntegerField renders as bigint on
+    PostgreSQL, which can hold DecimalField(max_digits=12) penny totals.
+    """
+    return Cast(
+        Round(F(field_name) * 100, precision=0),
+        output_field=BigIntegerField(),
+    )
 
 
 def generate_order_reference() -> str:
@@ -69,6 +92,7 @@ class Order(models.Model):
         "payment_status",
         "job_status",
         "source_cart_id",
+        "is_finalised",
     )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -120,6 +144,7 @@ class Order(models.Model):
         default=PAYMENT_PENDING_DEPOSIT,
     )
     job_status = models.CharField(max_length=32, default=JOB_NEW)
+    is_finalised = models.BooleanField(default=False, editable=False)
     internal_notes = models.TextField(blank=True)
 
     source_cart = models.ForeignKey(
@@ -149,9 +174,15 @@ class Order(models.Model):
                 check=Q(amount_paid__lte=F("full_total")),
                 name="order_amount_paid_lte_full_total",
             ),
+            # Whole pennies, added after each column is rounded. Decimal
+            # subtraction is floating point on SQLite and rejects valid totals
+            # such as £2.00. Columns stay two decimal places. clean() still
+            # requires the exact one-third split.
             models.CheckConstraint(
-                check=Q(
-                    deposit_required=F("full_total") - F("balance_on_completion")
+                check=Exact(
+                    _whole_pennies("full_total"),
+                    _whole_pennies("deposit_required")
+                    + _whole_pennies("balance_on_completion"),
                 ),
                 name="order_deposit_plus_balance_equals_total",
             ),
@@ -210,10 +241,16 @@ class Order(models.Model):
             raise ValidationError(errors)
 
     def save(self, *args, **kwargs):
-        if self._state.adding and not self.reference:
-            self.reference = generate_order_reference()
-        if not self._state.adding:
-            self._assert_snapshot_unchanged(kwargs.get("update_fields"))
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None and "is_finalised" in update_fields:
+            raise ValidationError("Order finalisation cannot be changed through save.")
+        if self._state.adding:
+            if self.is_finalised:
+                raise ValidationError("Orders cannot be created already finalised.")
+            if not self.reference:
+                self.reference = generate_order_reference()
+        else:
+            self._assert_snapshot_unchanged(update_fields)
         self.full_clean()
         super().save(*args, **kwargs)
 
@@ -231,6 +268,29 @@ class Order(models.Model):
                 raise ValidationError(
                     "Order snapshots cannot be rewritten after creation."
                 )
+
+    def _mark_finalised(self):
+        """Mark the commercial snapshot complete after checking saved rows.
+
+        An order that is already finalised is returned unchanged. This does
+        not recalculate prices or rewrite any other field. There is no
+        parameter that skips these checks.
+        """
+        if self.pk is None:
+            raise ValidationError("An unsaved order cannot be finalised.")
+
+        with transaction.atomic():
+            order = type(self).objects.select_for_update().get(pk=self.pk)
+            if order.is_finalised:
+                return order
+            _validate_saved_snapshot(order)
+            updated = type(self).objects.filter(pk=order.pk, is_finalised=False).update(
+                is_finalised=True
+            )
+            order.refresh_from_db()
+            if updated != 1 or not order.is_finalised:
+                raise ValidationError("The order snapshot could not be finalised.")
+            return order
 
 
 class OrderItem(models.Model):
@@ -263,7 +323,7 @@ class OrderItem(models.Model):
     product_name = models.CharField(max_length=200)
     product_slug = models.SlugField(max_length=50)
     sku = models.CharField(max_length=50, blank=True)
-    configuration_signature = models.CharField(max_length=512)
+    configuration_signature = models.CharField(max_length=512, blank=True)
     quantity = models.PositiveIntegerField(
         validators=[MinValueValidator(1), MaxValueValidator(MAX_ORDER_QUANTITY)]
     )
@@ -291,13 +351,17 @@ class OrderItem(models.Model):
                 name="orderitem_money_non_negative",
             ),
             models.CheckConstraint(
-                check=Q(
-                    configured_unit_price=F("base_unit_price") + F("options_total")
+                check=Exact(
+                    _whole_pennies("configured_unit_price"),
+                    _whole_pennies("base_unit_price") + _whole_pennies("options_total"),
                 ),
                 name="orderitem_configured_unit_matches_parts",
             ),
             models.CheckConstraint(
-                check=Q(line_total=F("configured_unit_price") * F("quantity")),
+                check=Exact(
+                    _whole_pennies("line_total"),
+                    _whole_pennies("configured_unit_price") * F("quantity"),
+                ),
                 name="orderitem_line_total_matches_quantity",
             ),
         ]
@@ -342,8 +406,12 @@ class OrderItem(models.Model):
     def save(self, *args, **kwargs):
         if not self._state.adding:
             raise ValidationError("Order item snapshots cannot be changed.")
-        self.full_clean()
-        super().save(*args, **kwargs)
+        with transaction.atomic():
+            if self.pk and type(self).objects.filter(pk=self.pk).exists():
+                raise ValidationError("Order item snapshots cannot be changed.")
+            _lock_open_order(self.order_id)
+            self.full_clean()
+            super().save(*args, **kwargs)
 
 
 class OrderItemOption(models.Model):
@@ -421,5 +489,86 @@ class OrderItemOption(models.Model):
     def save(self, *args, **kwargs):
         if not self._state.adding:
             raise ValidationError("Selected-option snapshots cannot be changed.")
-        self.full_clean()
-        super().save(*args, **kwargs)
+        with transaction.atomic():
+            if self.pk and type(self).objects.filter(pk=self.pk).exists():
+                raise ValidationError("Selected-option snapshots cannot be changed.")
+            order_id = (
+                OrderItem.objects.filter(pk=self.order_item_id)
+                .values_list("order_id", flat=True)
+                .first()
+            )
+            _lock_open_order(order_id)
+            self.full_clean()
+            super().save(*args, **kwargs)
+
+
+def _lock_open_order(order_id):
+    """Lock the stored parent order and reject a completed snapshot."""
+    if not order_id:
+        raise ValidationError("Order snapshot was not found.")
+    try:
+        order = Order.objects.select_for_update().get(pk=order_id)
+    except Order.DoesNotExist:
+        raise ValidationError("Order snapshot was not found.")
+    if order.is_finalised:
+        raise ValidationError("Finalised order snapshots cannot be changed.")
+    return order
+
+
+def _validate_saved_snapshot(order):
+    """Check persisted snapshot rows. Do not read live catalogue prices."""
+    items = list(OrderItem.objects.filter(order=order).order_by("position", "id"))
+    if not items:
+        raise ValidationError("An order snapshot needs at least one line.")
+
+    full_total = Decimal("0.00")
+    for item in items:
+        item.full_clean()
+        options = list(item.selected_options.order_by("position", "id"))
+        options_total = sum(
+            (option.price_adjustment for option in options),
+            Decimal("0.00"),
+        )
+        if options_total != item.options_total:
+            raise ValidationError("Saved option totals do not match the snapshot.")
+        if item.configured_unit_price != item.base_unit_price + item.options_total:
+            raise ValidationError("Saved unit prices do not match the snapshot.")
+        if item.line_total != item.configured_unit_price * item.quantity:
+            raise ValidationError("Saved line totals do not match the snapshot.")
+        try:
+            signature = build_configuration_signature(
+                [option.original_option_id for option in options]
+            )
+        except ValueError:
+            raise ValidationError("Saved option identities do not match the snapshot.")
+        if signature != item.configuration_signature:
+            raise ValidationError("Saved option identities do not match the snapshot.")
+        full_total += item.line_total
+
+    if full_total != order.full_total:
+        raise ValidationError("Saved line totals do not match the order total.")
+    split = calculate_deposit(order.full_total)
+    if (
+        order.deposit_required != split.deposit
+        or order.balance_on_completion != split.balance
+    ):
+        raise ValidationError("Saved deposit totals do not match the order total.")
+    if order.amount_paid != Decimal("0.00"):
+        raise ValidationError("A new order snapshot must be unpaid.")
+    if order.payment_status != Order.PAYMENT_PENDING_DEPOSIT:
+        raise ValidationError("A new order snapshot must be awaiting the deposit.")
+    if order.job_status != Order.JOB_NEW:
+        raise ValidationError("A new order snapshot must be a new job.")
+    if order.currency != Order.CURRENCY_GBP:
+        raise ValidationError("Orders are stored in GBP.")
+    if order.fulfilment_method != Order.FULFILMENT_WORKSHOP_FITTING:
+        raise ValidationError("Orders are completed by workshop fitting.")
+    if order.fitting_charge != Decimal("0.00"):
+        raise ValidationError("Workshop fitting is included.")
+    if order.tax_treatment != Order.TAX_NOT_VAT_REGISTERED or order.tax_amount != Decimal("0.00"):
+        raise ValidationError("No VAT is charged.")
+    if (
+        order.payment_terms != Order.PAYMENT_TERMS_THIRD_DEPOSIT
+        or order.payment_terms_text != Order.PAYMENT_TERMS_TEXT
+    ):
+        raise ValidationError("Orders use a one-third deposit.")

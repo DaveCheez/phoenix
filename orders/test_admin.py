@@ -1,6 +1,10 @@
+from decimal import Decimal
+from html.parser import HTMLParser
+
 from django.contrib.admin.sites import AdminSite
 from django.contrib.auth.models import User
-from django.test import RequestFactory, TestCase
+from django.test import RequestFactory, TestCase, override_settings
+from django.urls import reverse
 
 from .admin import (
     OrderAdmin,
@@ -43,6 +47,7 @@ class OrderAdminInspectionTests(TestCase):
             "outstanding_balance",
             "payment_status",
             "job_status",
+            "is_finalised",
         ):
             self.assertIn(field, order_admin.readonly_fields)
         self.assertEqual(
@@ -58,6 +63,7 @@ class OrderAdminInspectionTests(TestCase):
                 "outstanding_balance",
                 "payment_status",
                 "job_status",
+                "is_finalised",
             ],
         )
         self.assertNotIn("delete_selected", order_admin.get_actions(self.request))
@@ -84,3 +90,100 @@ class OrderAdminInspectionTests(TestCase):
             self.assertFalse(inline.has_delete_permission(self.request))
         self.assertEqual(item_inline.readonly_fields, item_inline.fields)
         self.assertEqual(option_inline.readonly_fields, option_inline.fields)
+
+    @override_settings(
+        STATICFILES_STORAGE="django.contrib.staticfiles.storage.StaticFilesStorage"
+    )
+    def test_admin_post_cannot_change_financial_or_status_fields(self):
+        self.client.force_login(self.user)
+        url = reverse("admin:orders_order_change", args=[self.order.pk])
+        page = self.client.get(url)
+        self.assertEqual(page.status_code, 200)
+        payload = _admin_form_values(page.content.decode())
+        payload.update(
+            {
+                "internal_notes": "Checked in workshop",
+                "full_total": "1.00",
+                "deposit_required": "1.00",
+                "balance_on_completion": "0.00",
+                "amount_paid": "50.00",
+                "payment_status": "paid",
+                "job_status": "fitted",
+                "is_finalised": "False",
+                "customer_name": "Someone else",
+                "_save": "Save",
+            }
+        )
+        response = self.client.post(url, payload)
+        self.assertEqual(response.status_code, 302)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.internal_notes, "Checked in workshop")
+        self.assertEqual(self.order.full_total, Decimal("825.00"))
+        self.assertEqual(self.order.amount_paid, Decimal("0.00"))
+        self.assertEqual(self.order.payment_status, Order.PAYMENT_PENDING_DEPOSIT)
+        self.assertEqual(self.order.job_status, Order.JOB_NEW)
+        self.assertTrue(self.order.is_finalised)
+        self.assertEqual(self.order.customer_name, "Alex Farmer")
+
+    def test_non_staff_cannot_open_an_order(self):
+        outsider = User.objects.create_user(
+            "viewer",
+            "viewer@example.com",
+            "password",
+        )
+        self.client.force_login(outsider)
+        url = reverse("admin:orders_order_change", args=[self.order.pk])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/admin/login/", response.url)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.full_total, Decimal("825.00"))
+        self.assertEqual(self.order.internal_notes, "")
+
+
+class _AdminFormParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.values = {}
+        self._textarea = None
+        self._select = None
+        self._selected = ""
+        self._buffer = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        name = attrs.get("name")
+        if tag == "input" and name:
+            if attrs.get("type") == "submit":
+                return
+            if attrs.get("type") == "checkbox":
+                if "checked" in attrs:
+                    self.values[name] = attrs.get("value", "on")
+                return
+            self.values[name] = attrs.get("value", "")
+        elif tag == "textarea" and name:
+            self._textarea = name
+            self._buffer = []
+        elif tag == "select" and name:
+            self._select = name
+            self._selected = ""
+        elif tag == "option" and self._select and "selected" in attrs:
+            self._selected = attrs.get("value", "")
+
+    def handle_data(self, data):
+        if self._textarea is not None:
+            self._buffer.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "textarea" and self._textarea is not None:
+            self.values[self._textarea] = "".join(self._buffer)
+            self._textarea = None
+        elif tag == "select" and self._select is not None:
+            self.values[self._select] = self._selected
+            self._select = None
+
+
+def _admin_form_values(html):
+    parser = _AdminFormParser()
+    parser.feed(html)
+    return parser.values
