@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "accounts",
     "cart",
+    "orders.apps.OrdersConfig",
     "storages",
     "store",
 ]
