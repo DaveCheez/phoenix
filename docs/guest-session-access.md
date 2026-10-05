@@ -89,6 +89,14 @@ a response can be lost after the commit, and repeating Add can insert another
 quantity. Token expiry and revocation reject later requests. They do not
 delete the stored cart or session rows.
 
+Anonymous start keeps session creation, cart creation, payload construction
+and serialization of that same 201 response in one transaction. A failure
+while that response is being prepared rolls the new session and cart back,
+and the new credential is not returned. A response lost after that commit, a
+failure in later middleware, or an uncertain database commit is not
+recoverable and is not made exactly-once. An unsuccessful client request does
+not always mean that no session was stored. The server does not retry it.
+
 The current production storefront still sends a `localStorage` cart id and
 will not satisfy this contract. Do not deploy this branch until the matching
 Nuxt change and the abuse limits below are in place. The basket cutover

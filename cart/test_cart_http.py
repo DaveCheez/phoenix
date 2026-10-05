@@ -4,6 +4,7 @@ SQLite checks the responses. It does not prove PostgreSQL row locks.
 The concurrency class at the bottom runs only on PostgreSQL.
 """
 
+import hashlib
 import logging
 import sys
 import threading
@@ -14,12 +15,13 @@ from decimal import Decimal
 
 from django.contrib.auth.models import User
 from django.core import mail
-from django.db import OperationalError, connection
+from django.db import InterfaceError, OperationalError, connection, transaction
 from django.test import RequestFactory, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from django.views.debug import get_exception_reporter_class
-from rest_framework.test import APIClient, APITestCase
+from rest_framework.renderers import JSONRenderer
+from rest_framework.test import APIClient, APITestCase, APITransactionTestCase
 from unittest.mock import patch
 
 from store.models import Category, Product, ProductOption, ProductOptionGroup
@@ -432,6 +434,58 @@ class CartHttpContractTests(APITestCase):
         self.assertEqual(Cart.objects.count(), 1)
         self.assertEqual(CartItem.objects.get().quantity, 2)
 
+    def test_replace_missing_rejects_a_supplied_cart_id(self):
+        issued = issue_guest_cart()
+        product = _product(slug="replace-guard")
+        session = issued.cart.guest_session
+        expiry = session.expires_at
+        token_hash = session.token_hash
+        self._auth(issued)
+        added = self.client.post(
+            reverse("add_to_cart"),
+            {"product_id": product.id, "quantity": 2, "options": []},
+            format="json",
+        )
+        self.assertEqual(added.status_code, 201)
+        cart_id = str(issued.cart.id)
+
+        body = self.client.post(
+            reverse("create_cart"),
+            {"action": "replace_missing", "cart_id": cart_id},
+            format="json",
+        )
+        query = self.client.post(
+            reverse("create_cart") + f"?cart_id={cart_id}",
+            {"action": "replace_missing"},
+            format="json",
+        )
+        self.assert_denied(body)
+        self.assert_denied(query)
+        session.refresh_from_db()
+        self.assertEqual(session.expires_at, expiry)
+        self.assertEqual(session.token_hash, token_hash)
+        self.assertEqual(Cart.objects.count(), 1)
+        self.assertEqual(CartItem.objects.get().quantity, 2)
+
+        issued.cart.delete()
+        missing_body = self.client.post(
+            reverse("create_cart"),
+            {"action": "replace_missing", "cart_id": cart_id},
+            format="json",
+        )
+        missing_query = self.client.post(
+            reverse("create_cart") + f"?cart_id={cart_id}",
+            {"action": "replace_missing"},
+            format="json",
+        )
+        self.assert_denied(missing_body)
+        self.assert_denied(missing_query)
+        self.assertFalse(Cart.objects.exists())
+        session.refresh_from_db()
+        self.assertEqual(session.expires_at, expiry)
+        self.assertEqual(session.token_hash, token_hash)
+        self.assertIsNone(session.revoked_at)
+
     def test_access_failure_rolls_back_a_partial_write(self):
         issued = issue_guest_cart()
         product = _product(slug="rollback-clip")
@@ -576,6 +630,201 @@ class CartCredentialReportTests(APITestCase):
         self.assertNotIn(token, email)
         self.assertNotIn(token_hash, email)
         self.assertIn("HTTP_AUTHORIZATION", email)
+
+
+class CartIssuanceTransactionTests(APITransactionTestCase):
+    """Commit-boundary coverage. TestCase would hide a real commit."""
+
+    def test_start_serializes_inside_the_issuance_transaction(self):
+        seen = {}
+        original = JSONRenderer.render
+
+        def spy(renderer, data, accepted_media_type=None, renderer_context=None):
+            if not renderer_context:
+                return original(renderer, data, accepted_media_type, renderer_context)
+            seen["calls"] = seen.get("calls", 0) + 1
+            seen["inside_transaction"] = transaction.get_connection().in_atomic_block
+            seen["sessions_during_render"] = GuestSession.objects.count()
+            seen["rendered_guest_access"] = (
+                isinstance(data, dict) and "guest_access" in data and "cart" in data
+            )
+            return original(renderer, data, accepted_media_type, renderer_context)
+
+        with patch.object(JSONRenderer, "render", spy):
+            response = self.client.post(
+                reverse("create_cart"),
+                {"action": "start"},
+                format="json",
+            )
+
+        self.assertEqual(seen["calls"], 1)
+        self.assertTrue(seen["inside_transaction"])
+        self.assertEqual(seen["sessions_during_render"], 1)
+        self.assertTrue(seen["rendered_guest_access"])
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.is_rendered)
+        self.assertTrue(response["Content-Type"].startswith("application/json"))
+        self.assertEqual(response["Cache-Control"], "no-store")
+        self.assertNotIn("cart_id", response.cookies)
+        self.assertNotIn("sessionid", response.cookies)
+        self.assertEqual(GuestSession.objects.count(), 1)
+        self.assertEqual(Cart.objects.count(), 1)
+        session = GuestSession.objects.get()
+        self.assertEqual(response.data["guest_access"]["expires_at"], session.expires_at.isoformat())
+        self.assertEqual(str(Cart.objects.get().guest_session_id), str(session.id))
+        self.assertNotIn(response.data["guest_access"]["token"], session.token_hash)
+
+    def test_payload_operational_error_rolls_back_real_issuance(self):
+        keeper = issue_guest_cart()
+        keeper_expiry = keeper.cart.guest_session.expires_at
+        keeper_hash = keeper.cart.guest_session.token_hash
+
+        def fail(cart):
+            self.assertEqual(GuestSession.objects.count(), 2)
+            self.assertNotEqual(cart.id, keeper.cart.id)
+            self.assertIsNotNone(cart.guest_session_id)
+            raise OperationalError("down")
+
+        with patch("cart.views.cart_payload", side_effect=fail):
+            response = self.client.post(
+                reverse("create_cart"),
+                {"action": "start"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data["code"], "CART_TEMPORARILY_UNAVAILABLE")
+        self.assertNotIn("guest_access", response.data)
+        self.assertNotIn("token", response.data)
+        self.assertEqual(response["Cache-Control"], "no-store")
+        self.assertNotIn("cart_id", response.cookies)
+        self.assertEqual(GuestSession.objects.count(), 1)
+        keeper.cart.guest_session.refresh_from_db()
+        self.assertEqual(keeper.cart.guest_session.expires_at, keeper_expiry)
+        self.assertEqual(keeper.cart.guest_session.token_hash, keeper_hash)
+        self.assertEqual(Cart.objects.get().id, keeper.cart.id)
+
+    def test_payload_interface_error_rolls_back_real_issuance(self):
+        def fail(cart):
+            self.assertEqual(GuestSession.objects.count(), 1)
+            self.assertEqual(cart.guest_session_id, GuestSession.objects.get().id)
+            raise InterfaceError("down")
+
+        with patch("cart.views.cart_payload", side_effect=fail):
+            response = self.client.post(
+                reverse("create_cart"),
+                {"action": "start"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data["code"], "CART_TEMPORARILY_UNAVAILABLE")
+        self.assertNotIn("guest_access", response.data)
+        self.assertFalse(GuestSession.objects.exists())
+        self.assertFalse(Cart.objects.exists())
+
+    def test_serialization_failure_rolls_back_without_success(self):
+        self.client.raise_request_exception = False
+        original = JSONRenderer.render
+
+        def fail(renderer, data, accepted_media_type=None, renderer_context=None):
+            if not renderer_context:
+                return original(renderer, data, accepted_media_type, renderer_context)
+            self.assertTrue(transaction.get_connection().in_atomic_block)
+            self.assertEqual(GuestSession.objects.count(), 1)
+            raise RuntimeError("issuance report")
+
+        with patch.object(JSONRenderer, "render", fail):
+            response = self.client.post(
+                reverse("create_cart"),
+                {"action": "start"},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertNotEqual(response.status_code, 201)
+        self.assertNotIn(b'"success": true', response.content)
+        self.assertFalse(GuestSession.objects.exists())
+        self.assertFalse(Cart.objects.exists())
+
+    def test_later_start_succeeds_after_a_rolled_back_failure(self):
+        with patch("cart.views.cart_payload", side_effect=OperationalError("down")):
+            failed = self.client.post(
+                reverse("create_cart"),
+                {"action": "start"},
+                format="json",
+            )
+
+        self.assertEqual(failed.status_code, 503)
+        self.assertFalse(GuestSession.objects.exists())
+        self.assertFalse(Cart.objects.exists())
+
+        started = self.client.post(
+            reverse("create_cart"),
+            {"action": "start"},
+            format="json",
+        )
+
+        self.assertEqual(started.status_code, 201)
+        self.assertEqual(GuestSession.objects.count(), 1)
+        self.assertEqual(Cart.objects.count(), 1)
+        self.assertIn("guest_access", started.data)
+
+
+_ISSUED_TOKEN = "LocalIssuanceCredentialValue" + ("0" * 15)
+
+
+@override_settings(
+    DEBUG=False,
+    ADMINS=[("Ops", "ops@example.com")],
+)
+class CartIssuanceReportTests(APITransactionTestCase):
+    def test_issuance_failure_redacts_the_new_credential(self):
+        self.assertEqual(len(_ISSUED_TOKEN), 43)
+        token_hash = hashlib.sha256(_ISSUED_TOKEN.encode("utf-8")).hexdigest()
+        seen = {}
+
+        def fail(cart):
+            seen["stored"] = GuestSession.objects.filter(token_hash=token_hash).exists()
+            raise RuntimeError("issuance report")
+
+        mail.outbox.clear()
+        self.client.raise_request_exception = False
+        self.client.cookies["cart_id"] = _ISSUED_TOKEN
+        request_logger = logging.getLogger("django.request")
+        captured = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                captured.append(self.format(record))
+
+        handler = _Capture()
+        request_logger.addHandler(handler)
+        try:
+            with patch("cart.guest_access.secrets.token_urlsafe", return_value=_ISSUED_TOKEN):
+                with patch("cart.views.cart_payload", side_effect=fail):
+                    response = self.client.post(
+                        reverse("create_cart"),
+                        {"action": "start"},
+                        format="json",
+                    )
+        finally:
+            request_logger.removeHandler(handler)
+
+        self.assertTrue(seen["stored"])
+        self.assertEqual(response.status_code, 500)
+        body = response.content.decode()
+        logged = "\n".join(captured)
+        self.assertEqual(len(mail.outbox), 1)
+        email = mail.outbox[0].body
+        for output in (body, logged, email):
+            self.assertNotIn(_ISSUED_TOKEN, output)
+            self.assertNotIn(token_hash, output)
+        self.assertIn("HTTP_COOKIE", email)
+        self.assertIn("********************", email)
+        self.assertEqual(response["Cache-Control"], "no-store")
+        self.assertFalse(GuestSession.objects.exists())
+        self.assertFalse(Cart.objects.exists())
 
 
 @unittest.skipUnless(

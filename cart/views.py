@@ -233,29 +233,56 @@ def create_cart(request):
 
 
 @sensitive_variables()
+def _render_negotiated_response(request, response):
+    """Serialize this response with the renderer already chosen for it.
+
+    Constructing a DRF ``Response`` does not render its body. Django does
+    that after the view returns. Issuance renders this same object first,
+    using the renderer and media type ``APIView.initial`` stored on the
+    request, so preparation stays inside the issuance transaction.
+    """
+    renderer = getattr(request, "accepted_renderer", None)
+    media_type = getattr(request, "accepted_media_type", None)
+    if renderer is None or not media_type:
+        raise RuntimeError("Cart issuance cannot render before content negotiation.")
+    parser_context = getattr(request, "parser_context", None) or {}
+    response.accepted_renderer = renderer
+    response.accepted_media_type = media_type
+    response.renderer_context = {
+        "view": parser_context.get("view"),
+        "args": parser_context.get("args", ()),
+        "kwargs": parser_context.get("kwargs", {}),
+        "request": request,
+    }
+    return response.render()
+
+
+@sensitive_variables()
 def _start_without_credential(request):
     if supplied_cart_ids(request) or single_action(request) == "replace_missing":
         return _access_denied()
     if not is_exact_start_body(request):
         return _start_required()
     try:
-        issued = issue_guest_cart()
+        with transaction.atomic():
+            issued = issue_guest_cart()
+            session = issued.cart.guest_session
+            response = _finish(
+                Response(
+                    {
+                        "success": True,
+                        "guest_access": {
+                            "token": issued.raw_token,
+                            "expires_at": session.expires_at.isoformat(),
+                        },
+                        "cart": cart_payload(issued.cart),
+                    },
+                    status=status.HTTP_201_CREATED,
+                )
+            )
+            return _render_negotiated_response(request, response)
     except (OperationalError, InterfaceError):
         return _unavailable()
-    session = issued.cart.guest_session
-    return _finish(
-        Response(
-            {
-                "success": True,
-                "guest_access": {
-                    "token": issued.raw_token,
-                    "expires_at": session.expires_at.isoformat(),
-                },
-                "cart": cart_payload(issued.cart),
-            },
-            status=status.HTTP_201_CREATED,
-        )
-    )
 
 
 @sensitive_variables()
