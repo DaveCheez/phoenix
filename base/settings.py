@@ -146,6 +146,10 @@ DEFAULT_EXCEPTION_REPORTER = "cart.credential_reporting.CartExceptionReporter"
 # lowercase hex value. Catalogue, health and admin routes do not read it.
 CART_APP_CREDENTIAL = config("CART_APP_CREDENTIAL", default="")
 
+# Empty by default. Counter key helpers reject it when called. Cart routes do
+# not read it until enforcement is added. It is not the application credential.
+CART_RATE_LIMIT_HMAC_KEY = config("CART_RATE_LIMIT_HMAC_KEY", default="")
+
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = csv_setting(
     "CORS_ALLOWED_ORIGINS",

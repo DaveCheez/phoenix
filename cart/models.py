@@ -156,3 +156,52 @@ class CartItemOption(models.Model):
 
     def __str__(self):
         return f"{self.cart_item} — {self.option}"
+
+
+RATE_LIMIT_SCOPES = ("issuance", "failed_access", "authenticated_cart")
+RATE_LIMIT_MAX_WINDOW_SECONDS = 86400
+
+
+class CartRateLimitCounter(models.Model):
+    """Fixed-window attempt counter. Not a customer quota and not a cart.
+
+    ``subject_key`` is an HMAC digest. This row does not store an address,
+    credential, customer, or request body, and it does not reference a cart,
+    guest session, or order. ``expires_at`` is storage grace only; nothing
+    deletes the row until a cleanup helper is scheduled.
+    """
+
+    scope = models.CharField(max_length=32)
+    subject_key = models.CharField(max_length=64)
+    window_seconds = models.PositiveIntegerField()
+    window_start = models.DateTimeField()
+    count = models.BigIntegerField()
+    expires_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("scope", "subject_key", "window_seconds", "window_start"),
+                name="cart_rate_limit_window_uniq",
+            ),
+            models.CheckConstraint(
+                check=Q(scope__in=RATE_LIMIT_SCOPES),
+                name="cart_rate_limit_counter_scope_valid",
+            ),
+            models.CheckConstraint(
+                check=Q(count__gte=0),
+                name="cart_rate_limit_counter_count_gte_0",
+            ),
+            models.CheckConstraint(
+                check=Q(window_seconds__gte=1)
+                & Q(window_seconds__lte=RATE_LIMIT_MAX_WINDOW_SECONDS),
+                name="cart_rate_limit_counter_window_range",
+            ),
+            models.CheckConstraint(
+                check=Q(expires_at__gt=models.F("window_start")),
+                name="cart_rate_limit_counter_expiry_after_start",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Cart rate limit {self.scope} {self.window_seconds}s"

@@ -66,8 +66,15 @@ query fields are not a fallback. The local frontend must send these headers
 before browser cart calls will succeed. The guard is not relaxed for the
 older transport.
 
-Rate limits are not implemented yet. A Nuxt-only limiter still would not
-cover a direct call to this public Django API.
+Rate limits are not enforced on cart routes yet. The counter table and its
+internal helpers exist so a later checkpoint can count attempts. A keyed
+digest is a pseudonym, not an anonymous identifier. IPv6 /64 grouping is a
+counter policy, not proof of one household. Changing the HMAC key would
+make new digests and can reset effective budgets. Row expiry is storage
+grace only and does not delete rows until cleanup is scheduled. A committed
+counter attempt is not refunded when a later cart write rolls back, and a
+lost connection around commit is not exactly-once. A counter-store failure
+is not the same as the whole application database being down.
 
 On this branch, every cart read and mutation requires the guest bearer.
 `POST /api/cart/create/` with no `Authorization` header and a body of exactly
