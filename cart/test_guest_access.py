@@ -30,6 +30,7 @@ from .guest_access import (
     revoke_guest_session,
 )
 from .models import Cart, CartItem, GuestSession
+from .test_application_client import CartAPIClient, cart_app_settings
 
 
 class GuestSessionCredentialTests(TestCase):
@@ -280,7 +281,9 @@ class GuestSessionAdminTests(TestCase):
         self.assertEqual(cart.session_key, "forged-session")
 
 
+@cart_app_settings
 class GuestSessionPublicCartTests(APITestCase):
+    client_class = CartAPIClient
     def test_existing_cart_response_has_no_credential_fields(self):
         issued = issue_guest_cart()
         denied = self.client.get(reverse("get_cart"), {"cart_id": str(issued.cart.id)})

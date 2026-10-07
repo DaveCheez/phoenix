@@ -9,10 +9,13 @@ from rest_framework.test import APITestCase
 from store.models import Category, Product, ProductOption, ProductOptionGroup
 
 from .guest_access import issue_guest_cart
+from .test_application_client import CartAPIClient, cart_app_settings
 from .models import Cart, CartItem, CartItemOption
 
 
+@cart_app_settings
 class CartOptionPricingTests(APITestCase):
+    client_class = CartAPIClient
     def setUp(self):
         self.category = Category.objects.create(
             name="Roof Racks",

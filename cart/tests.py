@@ -7,9 +7,13 @@ from store.models import Category, Product
 
 from .guest_access import issue_guest_cart
 from .models import Cart, CartItem
+from .test_application_client import CartAPIClient, cart_app_settings
 
 
+@cart_app_settings
 class CartAPITests(APITestCase):
+    client_class = CartAPIClient
+
     def setUp(self):
         category = Category.objects.create(
             name="Roof Racks",

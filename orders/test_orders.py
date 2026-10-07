@@ -3,11 +3,15 @@ from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APITestCase
 
 from cart.guest_access import issue_guest_cart
+from cart.test_application_client import (
+    TEST_APP_CREDENTIAL,
+    TEST_SHOPPER_ADDRESS,
+)
 from cart.models import Cart, CartItem
 from store.models import Category, Product, ProductOption, ProductOptionGroup
 
@@ -393,6 +397,7 @@ class OrderSnapshotTests(TestCase):
 
 
 class ExistingApiUnaffectedTests(APITestCase):
+    @override_settings(CART_APP_CREDENTIAL=TEST_APP_CREDENTIAL)
     def test_product_option_price_alias_and_cart_add_still_work(self):
         category = Category.objects.create(
             name="Racks",
@@ -421,7 +426,11 @@ class ExistingApiUnaffectedTests(APITestCase):
         self.assertEqual(payload_option["price_adjustment"], "85.50")
 
         issued = issue_guest_cart()
-        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {issued.raw_token}")
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {issued.raw_token}",
+            HTTP_X_PHOENIX_APP_CREDENTIAL=TEST_APP_CREDENTIAL,
+            HTTP_X_PHOENIX_SHOPPER_ADDRESS=TEST_SHOPPER_ADDRESS,
+        )
         add = self.client.post(
             reverse("add_to_cart"),
             {

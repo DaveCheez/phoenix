@@ -14,6 +14,7 @@ from store.models import Category, Product, ProductOption, ProductOptionGroup
 from .configuration import BLANK_CONFIGURATION_SIGNATURE, build_configuration_signature
 from .admin import CartItemAdmin, CartItemOptionAdmin, CartItemOptionInline
 from .guest_access import issue_guest_cart
+from .test_application_client import CartAPIClient, cart_app_settings
 from .models import Cart, CartItem, CartItemOption
 
 
@@ -199,7 +200,9 @@ class CartConfigurationModelTests(TestCase):
         self.assertTrue(CartItemOption.objects.filter(group=self.group).exists())
 
 
+@cart_app_settings
 class CartConfigurationAPITests(APITestCase):
+    client_class = CartAPIClient
     def setUp(self):
         self.category = Category.objects.create(
             name="Roof Racks",

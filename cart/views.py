@@ -10,6 +10,7 @@ from rest_framework.response import Response
 
 from store.models import Product
 
+from .application_access import ApplicationAccessRejected, authenticate_cart_application
 from .exceptions import CartOptionError
 from .guest_access import GuestAccessError, issue_guest_cart, replace_missing_guest_cart
 from .http_access import (
@@ -48,6 +49,11 @@ _START_REQUIRED_BODY = {
     "success": False,
     "code": "START_REQUIRED",
     "error": "An explicit start is required to create a guest cart.",
+}
+_APPLICATION_REJECTED_BODY = {
+    "success": False,
+    "code": "CART_APPLICATION_REJECTED",
+    "error": "Cart service is temporarily unavailable.",
 }
 
 
@@ -102,6 +108,22 @@ def _unavailable():
 
 def _start_required():
     return _finish(Response(_START_REQUIRED_BODY, status=status.HTTP_400_BAD_REQUEST))
+
+
+@sensitive_variables()
+def _application_gate(request):
+    """Authenticate the calling server before any guest or cart work."""
+    try:
+        authenticate_cart_application(request)
+    except ApplicationAccessRejected:
+        logger.warning("cart_application_rejected")
+        return _finish(
+            Response(
+                _APPLICATION_REJECTED_BODY,
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        )
+    return None
 
 
 def _option_error(exc: CartOptionError) -> Response:
@@ -220,6 +242,9 @@ def _load_product(product_id):
 @sensitive_variables()
 def create_cart(request):
     """Start a guest cart, or return the cart for a bearer already presented."""
+    rejected = _application_gate(request)
+    if rejected is not None:
+        return rejected
     try:
         bearer = read_bearer(request)
     except GuestAccessError:
@@ -317,6 +342,9 @@ def _open_authenticated_cart(request, raw_token):
 @permission_classes([AllowAny])
 @sensitive_variables()
 def get_cart(request):
+    rejected = _application_gate(request)
+    if rejected is not None:
+        return rejected
     try:
         cart = _read_cart(request, _require_token(request))
         return _cart_response(cart, status_code=status.HTTP_200_OK)
@@ -361,6 +389,9 @@ def add_to_cart(request):
     The write is not idempotent. A client that does not see this response
     must not assume that repeating the add is safe.
     """
+    rejected = _application_gate(request)
+    if rejected is not None:
+        return rejected
     return _mutate(request, _add)
 
 
@@ -399,6 +430,9 @@ def _update(request, cart):
 @permission_classes([AllowAny])
 @sensitive_variables()
 def update_cart_item(request):
+    rejected = _application_gate(request)
+    if rejected is not None:
+        return rejected
     return _mutate(request, _update)
 
 
@@ -425,6 +459,9 @@ def _remove(request, cart):
 @permission_classes([AllowAny])
 @sensitive_variables()
 def remove_from_cart(request):
+    rejected = _application_gate(request)
+    if rejected is not None:
+        return rejected
     return _mutate(request, _remove)
 
 
@@ -443,4 +480,7 @@ def _clear(request, cart):
 @permission_classes([AllowAny])
 @sensitive_variables()
 def clear_cart(request):
+    rejected = _application_gate(request)
+    if rejected is not None:
+        return rejected
     return _mutate(request, _clear)

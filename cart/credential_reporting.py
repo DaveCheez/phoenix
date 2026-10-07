@@ -2,15 +2,30 @@
 
 Django's default reporter filter hides settings whose names match
 API, TOKEN, KEY, SECRET, PASS or SIGNATURE. ``HTTP_AUTHORIZATION`` and
-``HTTP_COOKIE`` do not match those names, and the text report prints
-``request.COOKIES`` without passing them through that filter.
+``HTTP_COOKIE`` do not match those names. ``CREDENTIAL`` is not in that
+list either, so ``CART_APP_CREDENTIAL`` and the application header need
+an explicit match. The text report prints ``request.COOKIES`` without
+passing them through that filter.
 """
+
+import re
 
 from django.views.debug import ExceptionReporter, SafeExceptionReporterFilter
 
 
 class CartExceptionReporterFilter(SafeExceptionReporterFilter):
-    redacted_meta = frozenset({"HTTP_AUTHORIZATION", "HTTP_COOKIE"})
+    hidden_settings = re.compile(
+        "API|TOKEN|KEY|SECRET|PASS|SIGNATURE|CREDENTIAL|SHOPPER_ADDRESS",
+        re.IGNORECASE,
+    )
+    redacted_meta = frozenset(
+        {
+            "HTTP_AUTHORIZATION",
+            "HTTP_COOKIE",
+            "HTTP_X_PHOENIX_APP_CREDENTIAL",
+            "HTTP_X_PHOENIX_SHOPPER_ADDRESS",
+        }
+    )
 
     def get_safe_request_meta(self, request):
         cleaned = super().get_safe_request_meta(request)

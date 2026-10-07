@@ -142,6 +142,10 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 DEFAULT_EXCEPTION_REPORTER_FILTER = "cart.credential_reporting.CartExceptionReporterFilter"
 DEFAULT_EXCEPTION_REPORTER = "cart.credential_reporting.CartExceptionReporter"
 
+# Empty by default. Cart data routes fail closed until this is a 64-character
+# lowercase hex value. Catalogue, health and admin routes do not read it.
+CART_APP_CREDENTIAL = config("CART_APP_CREDENTIAL", default="")
+
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = csv_setting(
     "CORS_ALLOWED_ORIGINS",

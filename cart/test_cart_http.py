@@ -21,7 +21,8 @@ from django.urls import reverse
 from django.utils import timezone
 from django.views.debug import get_exception_reporter_class
 from rest_framework.renderers import JSONRenderer
-from rest_framework.test import APIClient, APITestCase, APITransactionTestCase
+from rest_framework.test import APITestCase, APITransactionTestCase
+from .test_application_client import CartAPIClient, cart_app_settings
 from unittest.mock import patch
 
 from store.models import Category, Product, ProductOption, ProductOptionGroup
@@ -47,7 +48,10 @@ def _product(name="Clip", slug="http-clip", price="10.00"):
     )
 
 
+@cart_app_settings
 class CartHttpContractTests(APITestCase):
+    client_class = CartAPIClient
+
     def assert_denied(self, response):
         self.assertEqual(response.status_code, 401)
         self.assertNotEqual(response.status_code, 403)
@@ -394,7 +398,7 @@ class CartHttpContractTests(APITestCase):
         self.assertEqual(fetched["Cache-Control"], "no-store")
         self.assertFalse(Cart.objects.exists())
 
-        anonymous = APIClient()
+        anonymous = CartAPIClient()
         rejected = anonymous.post(
             reverse("create_cart"),
             {"action": "replace_missing"},
@@ -569,8 +573,10 @@ class CartHttpContractTests(APITestCase):
 @override_settings(
     DEBUG=False,
     ADMINS=[("Ops", "ops@example.com")],
+    CART_APP_CREDENTIAL="0123456789abcdef" * 4,
 )
 class CartCredentialReportTests(APITestCase):
+    client_class = CartAPIClient
     def test_production_reports_redact_the_credential(self):
         issued = issue_guest_cart()
         token = issued.raw_token
@@ -632,7 +638,9 @@ class CartCredentialReportTests(APITestCase):
         self.assertIn("HTTP_AUTHORIZATION", email)
 
 
+@cart_app_settings
 class CartIssuanceTransactionTests(APITransactionTestCase):
+    client_class = CartAPIClient
     """Commit-boundary coverage. TestCase would hide a real commit."""
 
     def test_start_serializes_inside_the_issuance_transaction(self):
@@ -777,8 +785,10 @@ _ISSUED_TOKEN = "LocalIssuanceCredentialValue" + ("0" * 15)
 @override_settings(
     DEBUG=False,
     ADMINS=[("Ops", "ops@example.com")],
+    CART_APP_CREDENTIAL="0123456789abcdef" * 4,
 )
 class CartIssuanceReportTests(APITransactionTestCase):
+    client_class = CartAPIClient
     def test_issuance_failure_redacts_the_new_credential(self):
         self.assertEqual(len(_ISSUED_TOKEN), 43)
         token_hash = hashlib.sha256(_ISSUED_TOKEN.encode("utf-8")).hexdigest()
@@ -831,6 +841,7 @@ class CartIssuanceReportTests(APITransactionTestCase):
     connection.vendor == "postgresql",
     "PostgreSQL row-lock evidence only. Skipped on the normal SQLite run.",
 )
+@cart_app_settings
 class CartHttpPostgresLockTests(TransactionTestCase):
     def test_http_mutation_holds_the_session_until_revocation_can_proceed(self):
         issued = issue_guest_cart()
@@ -871,7 +882,7 @@ class CartHttpPostgresLockTests(TransactionTestCase):
             from django.db import connection as thread_connection
 
             thread_connection.close()
-            client = APIClient()
+            client = CartAPIClient()
             try:
                 with patch("cart.views.add_product_to_cart", side_effect=pausing):
                     state["response"] = client.post(
@@ -926,7 +937,7 @@ class CartHttpPostgresLockTests(TransactionTestCase):
         self.assertEqual(state["response"].status_code, 201)
         self.assertTrue(state.get("revoked"))
         self.assertEqual(CartItem.objects.count(), 1)
-        follow_up = APIClient().get(
+        follow_up = CartAPIClient().get(
             reverse("get_cart"),
             HTTP_AUTHORIZATION=f"Bearer {token}",
         )
@@ -949,7 +960,7 @@ class CartHttpPostgresLockTests(TransactionTestCase):
             from django.db import connection as thread_connection
 
             thread_connection.close()
-            client = APIClient()
+            client = CartAPIClient()
             try:
                 barrier.wait(15)
                 response = client.post(

@@ -52,6 +52,23 @@ order from the same source cart. This checkpoint does not add that link.
 
 ## HTTP enforcement
 
+Every cart read and mutation first requires the separate application
+credential in `X-Phoenix-App-Credential` and one shopper address in
+`X-Phoenix-Shopper-Address`. Anonymous start means there is no guest bearer
+yet. It still requires those two application headers. A missing, malformed
+or unconfigured application credential, or a missing or malformed address,
+returns `503 CART_APPLICATION_REJECTED` with `Cache-Control: no-store`.
+That response is not the guest `401`, and it does not set a guest challenge.
+Django accepts the address only because the application credential matched.
+It cannot prove that the authorised server supplied the shopper's true
+address. `REMOTE_ADDR`, `do-connecting-ip`, `X-Forwarded-For` and body or
+query fields are not a fallback. The local frontend must send these headers
+before browser cart calls will succeed. The guard is not relaxed for the
+older transport.
+
+Rate limits are not implemented yet. A Nuxt-only limiter still would not
+cover a direct call to this public Django API.
+
 On this branch, every cart read and mutation requires the guest bearer.
 `POST /api/cart/create/` with no `Authorization` header and a body of exactly
 `{"action": "start"}` is the only issuance path. It returns `guest_access.token`
