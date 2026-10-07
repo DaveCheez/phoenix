@@ -153,9 +153,17 @@ CART_RATE_LIMIT_HMAC_KEY = config("CART_RATE_LIMIT_HMAC_KEY", default="")
 # Disabled by default. A string such as "false" must not enable enforcement.
 CART_RATE_LIMIT_ENABLED = config("CART_RATE_LIMIT_ENABLED", default=False, cast=bool)
 
-# Empty until production quotas are approved. The HTTP adapter parses this
-# only when enforcement is enabled. Request parameters cannot supply it.
+# Empty until production quotas are approved. Cart routes parse this only
+# when enforcement is enabled. It stays the three cart scopes. Request
+# parameters cannot supply it.
 CART_RATE_LIMIT_POLICIES = config("CART_RATE_LIMIT_POLICIES", default="")
+
+# Empty until production quotas are approved. POST /api/cart/budget/ parses
+# this only when enforcement is enabled. Ordinary cart routes do not read it.
+CART_FRONTEND_RATE_LIMIT_POLICIES = config(
+    "CART_FRONTEND_RATE_LIMIT_POLICIES",
+    default="",
+)
 
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = csv_setting(

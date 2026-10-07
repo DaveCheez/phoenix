@@ -12,8 +12,8 @@ rows would no longer match, which resets effective budgets. Rotation needs a
 later operational procedure. This module does not rotate keys.
 
 IPv6 addresses are grouped at /64 before hashing. That is a counter grouping
-policy. It does not mean a /64 is one person or one household. The grouping
-is not used by cart routes yet.
+policy. It does not mean a /64 is one person or one household. Address scopes
+use that grouping. Session scopes do not.
 """
 
 import hashlib
@@ -40,7 +40,7 @@ _PLACEHOLDER_MARKERS = (
     "todo",
 )
 _DOMAIN = b"phoenix-vanz.cart-rate-limit.v1"
-_ADDRESS_SCOPES = frozenset({"issuance", "failed_access"})
+_ADDRESS_SCOPES = frozenset({"issuance", "failed_access", "csrf", "reset"})
 _SESSION_SCOPES = frozenset({"authenticated_cart"})
 
 
@@ -50,7 +50,11 @@ class SubjectKeyError(Exception):
 
 @sensitive_variables()
 def subject_key_for_address(*, scope, address):
-    """Digest one canonical address for an issuance or failed-access scope."""
+    """Digest one canonical address for an address scope.
+
+    Address scopes are issuance, failed_access, csrf and reset. A guest
+    session is not an address subject.
+    """
     if scope not in _ADDRESS_SCOPES:
         raise SubjectKeyError("Scope does not accept an address subject.")
     try:

@@ -27,7 +27,6 @@ from rest_framework import status
 from rest_framework.response import Response
 
 from .guest_access import GuestAccessError, get_guest_session
-from .models import RATE_LIMIT_SCOPES
 from .rate_limit import (
     RateLimitNestedTransactionError,
     RateLimitStoreError,
@@ -44,7 +43,10 @@ from .rate_limit_subjects import (
 
 logger = logging.getLogger(__name__)
 
-_SCOPES = ("issuance", "failed_access", "authenticated_cart")
+# Cart routes require this group only. It is not the model's full scope list.
+# csrf and reset belong to CART_FRONTEND_RATE_LIMIT_POLICIES.
+CART_POLICY_SCOPES = ("issuance", "failed_access", "authenticated_cart")
+FRONTEND_POLICY_SCOPES = ("csrf", "reset")
 _UNAVAILABLE_BODY = {
     "success": False,
     "code": "CART_TEMPORARILY_UNAVAILABLE",
@@ -145,8 +147,22 @@ def _subject_key(*, scope, address, session_id):
 
 
 def _policy_windows(scope):
-    policies = _load_policies()
-    if set(policies) != set(_SCOPES) or scope not in policies:
+    """Windows for one cart scope. Frontend policies are not consulted."""
+    return policy_windows(
+        raw=getattr(settings, "CART_RATE_LIMIT_POLICIES", ""),
+        required_scopes=CART_POLICY_SCOPES,
+        scope=scope,
+    )
+
+
+def policy_windows(*, raw, required_scopes, scope):
+    """Parse one configured policy group and return that scope's windows.
+
+    ``required_scopes`` is the exact key set for this group. Expanding the
+    model scope list does not add keys to an existing group.
+    """
+    policies = _parse_policy_document(raw)
+    if set(policies) != set(required_scopes) or scope not in required_scopes:
         raise RateLimitConfigurationError()
     entries = policies[scope]
     if isinstance(entries, (str, bytes)) or not isinstance(entries, (list, tuple)):
@@ -163,13 +179,10 @@ def _policy_windows(scope):
                 limit=entry["limit"],
             )
         )
-    if scope not in RATE_LIMIT_SCOPES:
-        raise RateLimitConfigurationError()
     return tuple(windows)
 
 
-def _load_policies():
-    raw = getattr(settings, "CART_RATE_LIMIT_POLICIES", "")
+def _parse_policy_document(raw):
     if isinstance(raw, str):
         if raw.strip() == "":
             raise RateLimitConfigurationError()

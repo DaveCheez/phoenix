@@ -86,6 +86,59 @@ guest. If issuance accounting is unavailable, the start is the existing
 guest ``401`` still stands. If authenticated accounting is unavailable, the
 existing guest checks continue and a fixed log category is recorded.
 ``RateLimitStoreError`` is the only outage that uses those rules.
+Authenticated cart still continues when only that counter store is down.
+CSRF and reset do not use that fail-open rule.
+
+``POST /api/cart/budget/`` is a separate application-only check for a later
+Nuxt handler. It is publicly reachable and requires
+``X-Phoenix-App-Credential`` and ``X-Phoenix-Shopper-Address``. It does not
+accept a guest bearer instead, and it does not read one when the caller
+sends it. The body is exactly ``{"operation": "csrf"}`` or
+``{"operation": "reset"}``. Anything else is ``400 CART_BUDGET_REQUEST_INVALID``
+and writes no counter. Unsupported media types stay the framework ``415``.
+``OPTIONS`` does not account. Other methods stay framework errors. Every
+cart response, including those errors, is ``Cache-Control: no-store``.
+
+A valid request while enforcement is off returns ``200 CART_BUDGET_ALLOWED``
+without reading the counter table, the HMAC key, or
+``CART_FRONTEND_RATE_LIMIT_POLICIES``. When enforcement is on, that setting
+must be exactly the ``csrf`` and ``reset`` window lists, and the existing
+HMAC key must be valid. Ordinary cart routes keep the three-scope
+``CART_RATE_LIMIT_POLICIES`` object and do not require the frontend object.
+A bad enabled configuration is ``503 CART_TEMPORARILY_UNAVAILABLE``. A
+counter-store failure is that same ``503`` for both operations. A denial is
+``429 CART_RATE_LIMITED`` with a positive ``Retry-After``. Neither response
+is a guest challenge, a credential, or a reusable permit. The attempt stays
+counted if Nuxt later fails. This route does not select, issue, rotate, or
+clear a guest or a cart.
+
+Reversing ``cart/migrations/0006_frontend_budget_scopes.py`` restores the
+older scope check. That reverse is not safe while ``csrf`` or ``reset`` rows
+exist. Do not delete those rows to make the reverse succeed.
+
+Nuxt integration is not done. The later order is:
+
+CSRF: the existing host, Fetch Metadata and Origin or Referer checks, then
+this authenticated budget call with ``operation=csrf``, and only then
+bootstrap-cookie creation or reuse and token issuance. That call cannot
+require the CSRF token it is about to issue.
+
+Reset: the existing origin, JSON and session-bound CSRF checks, then this
+budget call with ``operation=reset``, then the existing guest-access probe
+and the explicit local reset. A denied or unavailable budget stops the
+protected Nuxt action before any cookie change or token issuance.
+
+The reset's later guest-cart probe is a different request. It may consume
+``authenticated_cart`` or ``failed_access``. That is not a second charge for
+the budget call. Nuxt omits the guest bearer on budget calls and sends the
+application credential with the server-selected address. Only a validated
+``200 CART_BUDGET_ALLOWED`` continues. Do not cache that decision and do not
+retry the budget call automatically.
+
+This adds a Django request to CSRF operations that used to stay inside Nuxt.
+That changes their availability and latency. Update source request accounting
+when the frontend calls it. Do not treat this backend route as a finished
+storefront control.
 
 A keyed digest is a pseudonym, not an anonymous identifier. IPv6 /64 grouping
 is a counter policy, not proof of one household. Changing the HMAC key would
@@ -162,10 +215,12 @@ issuance. A mutation must not be replayed after an uncertain failure.
 
 A limiter that only wraps Nuxt does not cover a direct call to this public
 Django start route. The Django counters can be enabled only with approved
-numerical policies. Still required before release: those quotas, shared
-checks for Nuxt CSRF and reset, forwarding ``Retry-After`` through the
-frontend, cleanup scheduling and backlog monitoring, and a coordinated
-cutover. A request rejected by the application gate is not in these budgets.
+numerical policies. ``POST /api/cart/budget/`` is the Django check Nuxt must
+call for CSRF and reset; the Nuxt handler itself is still pending. Still
+required before release: those quotas, the Nuxt calls in the order above,
+forwarding ``Retry-After`` through the frontend, cleanup scheduling and
+backlog monitoring, and a coordinated cutover. A request rejected by the
+application gate is not in these budgets.
 
 The business owner has approved the basket cutover. Historical anonymous
 carts remain stored and unbound. There is no UUID-based claim and no

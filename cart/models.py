@@ -158,7 +158,13 @@ class CartItemOption(models.Model):
         return f"{self.cart_item} — {self.option}"
 
 
-RATE_LIMIT_SCOPES = ("issuance", "failed_access", "authenticated_cart")
+RATE_LIMIT_SCOPES = (
+    "issuance",
+    "failed_access",
+    "authenticated_cart",
+    "csrf",
+    "reset",
+)
 RATE_LIMIT_MAX_WINDOW_SECONDS = 86400
 
 
