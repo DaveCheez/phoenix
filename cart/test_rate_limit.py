@@ -1,6 +1,7 @@
 """Counter foundation tests. Routes are not wired to this service."""
 
 import logging
+import sys
 import threading
 import unittest
 import uuid
@@ -9,8 +10,10 @@ from unittest.mock import patch
 
 from django.db import OperationalError, connection, transaction
 from django.test import SimpleTestCase, TransactionTestCase, override_settings
+from django.test import RequestFactory
 from django.urls import reverse
 from django.utils import timezone
+from django.views.debug import get_exception_reporter_class
 from rest_framework.test import APITestCase
 
 from .models import Cart, CartRateLimitCounter
@@ -193,6 +196,22 @@ class CounterAccountingTests(TransactionTestCase):
         }
         self.assertEqual(counts, {10: 2, 60: 2})
 
+    def test_fractional_remaining_wait_rounds_up(self):
+        key = _address_key()
+        start = datetime(2026, 6, 1, tzinfo=dt_timezone.utc)
+        sampled = start + timedelta(seconds=8, microseconds=800000)
+        with patch("cart.rate_limit.accounting_now", return_value=sampled):
+            consume_windows(scope="issuance", subject_key=key, windows=[_window(10, 1)])
+            denied = consume_windows(
+                scope="issuance",
+                subject_key=key,
+                windows=[_window(10, 1)],
+            )
+        self.assertFalse(denied.allowed)
+        self.assertEqual(denied.retry_after_seconds, 2)
+        self.assertEqual(denied.windows[0].window_start, start)
+        self.assertEqual(CartRateLimitCounter.objects.get().count, 2)
+
     def test_exact_window_boundary_opens_the_next_window(self):
         key = _address_key()
         boundary = datetime(2026, 6, 1, 0, 0, 10, tzinfo=dt_timezone.utc)
@@ -239,7 +258,7 @@ class CounterAccountingTests(TransactionTestCase):
 
     def test_later_window_failure_rolls_back_the_earlier_increment(self):
         key = _address_key()
-        real = consume_windows.__globals__["_increment_window"]
+        real = consume_windows.__wrapped__.__globals__["_increment_window"].__wrapped__
         calls = {"n": 0}
 
         def fail_second(**kwargs):
@@ -357,6 +376,62 @@ class CounterAccountingTests(TransactionTestCase):
             count=1,
             expires_at=expires_at,
         )
+
+
+_REPORT_DIGEST = "ab" * 32
+
+
+@override_settings(DEBUG=False, CART_RATE_LIMIT_HMAC_KEY=TEST_HMAC_KEY)
+class CounterDigestReportTests(TransactionTestCase):
+    def test_production_traceback_hides_the_subject_digest(self):
+        digest = _REPORT_DIGEST
+        request = RequestFactory().get("/api/cart/")
+        original_cursor = connection.cursor
+
+        class _Proxy:
+            def __init__(self):
+                self.inner = original_cursor()
+
+            def __enter__(self):
+                self.inner.__enter__()
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return self.inner.__exit__(exc_type, exc, tb)
+
+            def execute(self, sql, params=None):
+                if "INSERT INTO" in str(sql):
+                    raise RuntimeError("rate report")
+                if params is None:
+                    return self.inner.execute(sql)
+                return self.inner.execute(sql, params)
+
+            def fetchone(self):
+                return self.inner.fetchone()
+
+        with patch.object(connection, "cursor", side_effect=_Proxy):
+            try:
+                consume_windows(
+                    scope="issuance",
+                    subject_key=digest,
+                    windows=[_window(60, 2)],
+                )
+            except RuntimeError:
+                reporter = get_exception_reporter_class(request)(request, *sys.exc_info())
+            else:
+                self.fail("counter write did not raise")
+        text = reporter.get_traceback_text()
+        self.assertNotIn(digest, text)
+        frames = {
+            frame["function"]: frame.get("vars", [])
+            for frame in reporter.get_traceback_data()["frames"]
+        }
+        for name in ("consume_windows", "_increment_window"):
+            self.assertIn(name, frames)
+            for _key, value in frames[name]:
+                rendered = str(value)
+                self.assertNotIn(digest, rendered)
+                self.assertIn(reporter.filter.cleansed_substitute, rendered)
 
 
 @unittest.skipUnless(

@@ -66,15 +66,36 @@ query fields are not a fallback. The local frontend must send these headers
 before browser cart calls will succeed. The guard is not relaxed for the
 older transport.
 
-Rate limits are not enforced on cart routes yet. The counter table and its
-internal helpers exist so a later checkpoint can count attempts. A keyed
-digest is a pseudonym, not an anonymous identifier. IPv6 /64 grouping is a
-counter policy, not proof of one household. Changing the HMAC key would
+Cart rate limits are implemented and off by default. ``CART_RATE_LIMIT_ENABLED``
+must be the boolean true, with ``CART_RATE_LIMIT_POLICIES`` naming issuance,
+failed_access and authenticated_cart, and with ``CART_RATE_LIMIT_HMAC_KEY``
+set. A bad enabled configuration is ``503 CART_TEMPORARILY_UNAVAILABLE`` and
+does not open the fail-open path. Production quotas are not filled in yet.
+
+When enforcement is on, accounting commits before the cart transaction. An
+explicit anonymous start counts issuance for the accepted shopper address. A
+bad guest credential counts failed_access for that address and still returns
+the guest ``401``. A resolved guest session counts authenticated_cart for its
+UUID, including a missing-cart ``409`` and ordinary validation errors. A
+``400 START_REQUIRED`` does not count. Application rejection does not count
+and does not invent an address. ``GET`` may insert counter rows and does not
+change the cart or session. A denial is ``429 CART_RATE_LIMITED`` with
+``Retry-After`` and ``Cache-Control: no-store``. It does not mint another
+guest. If issuance accounting is unavailable, the start is the existing
+``503`` and creates nothing. If failed-access accounting is unavailable, the
+guest ``401`` still stands. If authenticated accounting is unavailable, the
+existing guest checks continue and a fixed log category is recorded.
+``RateLimitStoreError`` is the only outage that uses those rules.
+
+A keyed digest is a pseudonym, not an anonymous identifier. IPv6 /64 grouping
+is a counter policy, not proof of one household. Changing the HMAC key would
 make new digests and can reset effective budgets. Row expiry is storage
 grace only and does not delete rows until cleanup is scheduled. A committed
 counter attempt is not refunded when a later cart write rolls back, and a
 lost connection around commit is not exactly-once. A counter-store failure
-is not the same as the whole application database being down.
+is not the same as the whole application database being down. Requests that
+never pass the application gate are outside these budgets, so edge protection
+is still required for that flood.
 
 On this branch, every cart read and mutation requires the guest bearer.
 `POST /api/cart/create/` with no `Authorization` header and a body of exactly
@@ -140,10 +161,11 @@ multiple Nuxt instances. Concurrent starts have to be coordinated before
 issuance. A mutation must not be replayed after an uncertain failure.
 
 A limiter that only wraps Nuxt does not cover a direct call to this public
-Django start route. Rate limits and a trusted client address, not
-`REMOTE_ADDR` behind Nuxt and not a client-supplied forwarded-IP list, are
-still required before release. This checkpoint does not add those limits or a
-new shared cache.
+Django start route. The Django counters can be enabled only with approved
+numerical policies. Still required before release: those quotas, shared
+checks for Nuxt CSRF and reset, forwarding ``Retry-After`` through the
+frontend, cleanup scheduling and backlog monitoring, and a coordinated
+cutover. A request rejected by the application gate is not in these budgets.
 
 The business owner has approved the basket cutover. Historical anonymous
 carts remain stored and unbound. There is no UUID-based claim and no

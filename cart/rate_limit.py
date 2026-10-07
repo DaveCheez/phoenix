@@ -33,6 +33,7 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.db import InterfaceError, OperationalError, connection, transaction
 from django.utils import timezone
+from django.views.decorators.debug import sensitive_variables
 
 from .models import (
     RATE_LIMIT_MAX_WINDOW_SECONDS,
@@ -94,6 +95,7 @@ class RateLimitDecision:
     windows: tuple
 
 
+@sensitive_variables()
 def consume_windows(*, scope, subject_key, windows):
     """Increment each window and return the committed decision.
 
@@ -264,6 +266,7 @@ def _decision(outcomes, sampled):
     )
 
 
+@sensitive_variables()
 def _increment_window(*, scope, subject_key, window_seconds, window_start, expires_at):
     meta = CartRateLimitCounter._meta
     quote = connection.ops.quote_name

@@ -12,7 +12,7 @@ from store.models import Product
 
 from .application_access import ApplicationAccessRejected, authenticate_cart_application
 from .exceptions import CartOptionError
-from .guest_access import GuestAccessError, issue_guest_cart, replace_missing_guest_cart
+from .guest_access import GuestAccessError, get_guest_session, issue_guest_cart, replace_missing_guest_cart
 from .http_access import (
     GuestCartMissing,
     consistent_cart_id,
@@ -24,6 +24,14 @@ from .http_access import (
 )
 from .models import CartItem
 from .operations import MAX_CART_QUANTITY, add_product_to_cart
+from .rate_limit_http import (
+    FAILED_ACCESS_STORE_OUTAGE,
+    RateLimitConfigurationError,
+    account_authenticated,
+    account_failed_access,
+    account_issuance,
+    enforcement_enabled,
+)
 from .option_selection import reject_browser_prices
 from .services import cart_payload
 
@@ -112,18 +120,75 @@ def _start_required():
 
 @sensitive_variables()
 def _application_gate(request):
-    """Authenticate the calling server before any guest or cart work."""
+    """Authenticate the calling server before any guest or cart work.
+
+    Returns the accepted shopper address, or None when the request is rejected.
+    """
     try:
-        authenticate_cart_application(request)
+        return authenticate_cart_application(request)
     except ApplicationAccessRejected:
         logger.warning("cart_application_rejected")
-        return _finish(
-            Response(
-                _APPLICATION_REJECTED_BODY,
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
+        return None
+
+
+def _application_rejected():
+    return _finish(
+        Response(
+            _APPLICATION_REJECTED_BODY,
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
-    return None
+    )
+
+
+@sensitive_variables()
+def _charge_failed_access(address):
+    """One failed-access attempt, then the existing guest 401.
+
+    A counter-store outage still returns that 401. Bad rate-limit
+    configuration returns 503 and does not authorise the request.
+    """
+    result = account_failed_access(address)
+    if result is None or result is FAILED_ACCESS_STORE_OUTAGE:
+        return _access_denied()
+    return result
+
+
+@sensitive_variables()
+def _charge_authenticated(address, raw_token):
+    """Identify the session without a business lock, then count one attempt.
+
+    The existing locked path must revalidate the session afterwards.
+    """
+    try:
+        if not enforcement_enabled():
+            return None
+    except RateLimitConfigurationError:
+        return _unavailable()
+    try:
+        session = get_guest_session(raw_token=raw_token, for_update=False)
+    except GuestAccessError:
+        return _charge_failed_access(address)
+    except (OperationalError, InterfaceError):
+        return _unavailable()
+    return account_authenticated(address, session.id)
+
+
+@sensitive_variables()
+def _prepare_guest_budget(request):
+    """Application gate plus one guest-budget decision for a required bearer."""
+    address = _application_gate(request)
+    if address is None:
+        return None, _application_rejected()
+    try:
+        raw_token = _require_token(request)
+    except GuestAccessError:
+        return None, _charge_failed_access(address)
+    except (OperationalError, InterfaceError):
+        return None, _unavailable()
+    blocked = _charge_authenticated(address, raw_token)
+    if blocked is not None:
+        return None, blocked
+    return raw_token, None
 
 
 def _option_error(exc: CartOptionError) -> Response:
@@ -242,18 +307,28 @@ def _load_product(product_id):
 @sensitive_variables()
 def create_cart(request):
     """Start a guest cart, or return the cart for a bearer already presented."""
-    rejected = _application_gate(request)
-    if rejected is not None:
-        return rejected
+    address = _application_gate(request)
+    if address is None:
+        return _application_rejected()
     try:
         bearer = read_bearer(request)
     except GuestAccessError:
-        return _access_denied()
+        return _charge_failed_access(address)
     except (OperationalError, InterfaceError):
         return _unavailable()
 
     if bearer.absent:
+        if supplied_cart_ids(request) or single_action(request) == "replace_missing":
+            return _charge_failed_access(address)
+        if not is_exact_start_body(request):
+            return _start_required()
+        blocked = account_issuance(address)
+        if blocked is not None:
+            return blocked
         return _start_without_credential(request)
+    blocked = _charge_authenticated(address, bearer.token)
+    if blocked is not None:
+        return blocked
     return _open_authenticated_cart(request, bearer.token)
 
 
@@ -342,9 +417,9 @@ def _open_authenticated_cart(request, raw_token):
 @permission_classes([AllowAny])
 @sensitive_variables()
 def get_cart(request):
-    rejected = _application_gate(request)
-    if rejected is not None:
-        return rejected
+    _token, blocked = _prepare_guest_budget(request)
+    if blocked is not None:
+        return blocked
     try:
         cart = _read_cart(request, _require_token(request))
         return _cart_response(cart, status_code=status.HTTP_200_OK)
@@ -389,9 +464,9 @@ def add_to_cart(request):
     The write is not idempotent. A client that does not see this response
     must not assume that repeating the add is safe.
     """
-    rejected = _application_gate(request)
-    if rejected is not None:
-        return rejected
+    _token, blocked = _prepare_guest_budget(request)
+    if blocked is not None:
+        return blocked
     return _mutate(request, _add)
 
 
@@ -430,9 +505,9 @@ def _update(request, cart):
 @permission_classes([AllowAny])
 @sensitive_variables()
 def update_cart_item(request):
-    rejected = _application_gate(request)
-    if rejected is not None:
-        return rejected
+    _token, blocked = _prepare_guest_budget(request)
+    if blocked is not None:
+        return blocked
     return _mutate(request, _update)
 
 
@@ -459,9 +534,9 @@ def _remove(request, cart):
 @permission_classes([AllowAny])
 @sensitive_variables()
 def remove_from_cart(request):
-    rejected = _application_gate(request)
-    if rejected is not None:
-        return rejected
+    _token, blocked = _prepare_guest_budget(request)
+    if blocked is not None:
+        return blocked
     return _mutate(request, _remove)
 
 
@@ -480,7 +555,7 @@ def _clear(request, cart):
 @permission_classes([AllowAny])
 @sensitive_variables()
 def clear_cart(request):
-    rejected = _application_gate(request)
-    if rejected is not None:
-        return rejected
+    _token, blocked = _prepare_guest_budget(request)
+    if blocked is not None:
+        return blocked
     return _mutate(request, _clear)

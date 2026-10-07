@@ -147,8 +147,15 @@ DEFAULT_EXCEPTION_REPORTER = "cart.credential_reporting.CartExceptionReporter"
 CART_APP_CREDENTIAL = config("CART_APP_CREDENTIAL", default="")
 
 # Empty by default. Counter key helpers reject it when called. Cart routes do
-# not read it until enforcement is added. It is not the application credential.
+# not read it until enforcement is enabled. It is not the application credential.
 CART_RATE_LIMIT_HMAC_KEY = config("CART_RATE_LIMIT_HMAC_KEY", default="")
+
+# Disabled by default. A string such as "false" must not enable enforcement.
+CART_RATE_LIMIT_ENABLED = config("CART_RATE_LIMIT_ENABLED", default=False, cast=bool)
+
+# Empty until production quotas are approved. The HTTP adapter parses this
+# only when enforcement is enabled. Request parameters cannot supply it.
+CART_RATE_LIMIT_POLICIES = config("CART_RATE_LIMIT_POLICIES", default="")
 
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = csv_setting(
