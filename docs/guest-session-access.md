@@ -143,7 +143,9 @@ storefront control.
 A keyed digest is a pseudonym, not an anonymous identifier. IPv6 /64 grouping
 is a counter policy, not proof of one household. Changing the HMAC key would
 make new digests and can reset effective budgets. Row expiry is storage
-grace only and does not delete rows until cleanup is scheduled. A committed
+grace only. ``manage.py cart_rate_limit_maintenance`` can report or delete
+expired counter rows when someone runs it; it is not scheduled. See
+[cart counter maintenance](cart-counter-maintenance.md). A committed
 counter attempt is not refunded when a later cart write rolls back, and a
 lost connection around commit is not exactly-once. A counter-store failure
 is not the same as the whole application database being down. Requests that
@@ -218,9 +220,9 @@ Django start route. The Django counters can be enabled only with approved
 numerical policies. ``POST /api/cart/budget/`` is the Django check Nuxt must
 call for CSRF and reset; the Nuxt handler itself is still pending. Still
 required before release: those quotas, the Nuxt calls in the order above,
-forwarding ``Retry-After`` through the frontend, cleanup scheduling and
-backlog monitoring, and a coordinated cutover. A request rejected by the
-application gate is not in these budgets.
+forwarding ``Retry-After`` through the frontend, scheduling and monitoring
+for ``cart_rate_limit_maintenance``, and a coordinated cutover. A request
+rejected by the application gate is not in these budgets.
 
 The business owner has approved the basket cutover. Historical anonymous
 carts remain stored and unbound. There is no UUID-based claim and no
