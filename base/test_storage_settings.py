@@ -99,6 +99,11 @@ class StorageSelectionTests(unittest.TestCase):
         self.assertNotEqual(lines[0], SPACES)
 
     def test_production_media_uses_spaces_and_keeps_whitenoise(self):
+        db_path = ROOT / "db.sqlite3"
+        # CI runs makemigrations before this test. That command uses the
+        # default file database and may create db.sqlite3. This assertion
+        # checks that loading production storage settings did not create it.
+        existed_before = db_path.exists()
         lines = _load_storages("False")
         self.assertEqual(lines[0], SPACES)
         self.assertEqual(lines[1], WHITENOISE)
@@ -114,4 +119,4 @@ class StorageSelectionTests(unittest.TestCase):
         self.assertEqual(lines[10], "media")
         self.assertEqual(lines[11], "aws_access_key_empty=True")
         self.assertEqual(lines[12], "aws_secret_empty=True")
-        self.assertFalse((ROOT / "db.sqlite3").exists())
+        self.assertEqual(db_path.exists(), existed_before)
