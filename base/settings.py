@@ -5,6 +5,7 @@ from django.core.exceptions import ImproperlyConfigured
 
 from base.contact_config import (
     DEVELOPMENT_CONTACT_PROXY_SECRET,
+    parse_boolean_setting,
     validate_contact_proxy_secret,
     validate_production_email_configuration,
 )
@@ -229,6 +230,16 @@ DEFAULT_FROM_EMAIL = config(
     default="webmaster@localhost" if DEBUG else "",
 )
 CONTACT_RECIPIENT_EMAIL = config("CONTACT_RECIPIENT_EMAIL", default="")
+_contact_email_enabled = config("CONTACT_EMAIL_ENABLED", default=None)
+if _contact_email_enabled is None or (
+    isinstance(_contact_email_enabled, str) and not _contact_email_enabled.strip()
+):
+    CONTACT_EMAIL_ENABLED = True
+else:
+    CONTACT_EMAIL_ENABLED = parse_boolean_setting(
+        _contact_email_enabled,
+        setting_name="CONTACT_EMAIL_ENABLED",
+    )
 CONTACT_PROXY_SECRET = config(
     "CONTACT_PROXY_SECRET",
     default=DEVELOPMENT_CONTACT_PROXY_SECRET if DEBUG else "",
@@ -246,4 +257,5 @@ validate_production_email_configuration(
     email_host_password=EMAIL_HOST_PASSWORD,
     default_from_email=DEFAULT_FROM_EMAIL,
     contact_recipient_email=CONTACT_RECIPIENT_EMAIL,
+    contact_email_enabled=CONTACT_EMAIL_ENABLED,
 )

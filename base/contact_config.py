@@ -10,6 +10,20 @@ NON_DELIVERY_EMAIL_BACKENDS = {
 }
 SMTP_EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 DEVELOPMENT_CONTACT_PROXY_SECRET = "local-development-contact-proxy-secret"
+_BOOLEAN_TRUE = {"1", "true", "yes", "on"}
+_BOOLEAN_FALSE = {"0", "false", "no", "off"}
+
+
+def parse_boolean_setting(value, *, setting_name):
+    """Accept only real boolean values. The text "false" must not become True."""
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in _BOOLEAN_TRUE:
+        return True
+    if normalized in _BOOLEAN_FALSE:
+        return False
+    raise ImproperlyConfigured(f"{setting_name} must be a boolean.")
 
 
 def validate_contact_proxy_secret(*, debug, secret):
@@ -35,8 +49,9 @@ def validate_production_email_configuration(
     email_host_password,
     default_from_email,
     contact_recipient_email,
+    contact_email_enabled=True,
 ):
-    if debug:
+    if debug or contact_email_enabled is False:
         return
 
     if not email_backend:

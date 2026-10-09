@@ -1,5 +1,6 @@
 import logging
 
+from django.conf import settings
 from django.db.models import Prefetch, Q
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
@@ -132,6 +133,7 @@ class HomeSlideListAPI(generics.ListAPIView):
 ENQUIRY_RECEIVED_MESSAGE = (
     "Thanks — your enquiry has been received. We will get back to you shortly."
 )
+ENQUIRY_SAVED_MESSAGE = "Your enquiry has been received."
 
 
 def _email_failure_category(exc):
@@ -221,6 +223,17 @@ class ContactEnquiryAPI(APIView):
             )
 
         enquiry = serializer.save()
+        if settings.CONTACT_EMAIL_ENABLED is False:
+            return Response(
+                {
+                    "success": True,
+                    "code": "ENQUIRY_RECEIVED",
+                    "message": ENQUIRY_SAVED_MESSAGE,
+                    "reference": enquiry.reference,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+
         response_code = "ENQUIRY_RECEIVED"
 
         try:
