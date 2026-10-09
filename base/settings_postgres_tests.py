@@ -90,7 +90,12 @@ DATABASES = {
     }
 }
 
-EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
+_EMAIL_FILE_PATH = os.environ.get("PHOENIX_VANZ_EMAIL_FILE_PATH", "").strip()
+if _EMAIL_FILE_PATH:
+    EMAIL_BACKEND = "django.core.mail.backends.filebased.EmailBackend"
+    EMAIL_FILE_PATH = _EMAIL_FILE_PATH
+else:
+    EMAIL_BACKEND = "django.core.mail.backends.locmem.EmailBackend"
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
