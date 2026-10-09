@@ -16,12 +16,38 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 IMAGE = "postgres:16"
 HOST_BIND = "127.0.0.1"
+_ORIGINAL_VENV = ROOT.parent / "venv"
+_CREDENTIAL_KEYS = {
+    "DATABASE_URL",
+    "PGHOST",
+    "PGPORT",
+    "PGUSER",
+    "PGPASSWORD",
+    "PGDATABASE",
+    "PGPASSFILE",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONFIG_FILE",
+    "BOTO_CONFIG",
+}
 ADMIN_USER = "phoenix_vanz_pgadmin"
 ADMIN_DATABASE = "phoenix_vanz_pgtest"
 APP_USER = "phoenix_vanz_app"
 APP_DATABASE = "phoenix_vanz_pgtest"
 TEST_DATABASE = "phoenix_vanz_pgtest_django"
 CONTAINER = f"phoenix-vanz-pgtest-{os.getpid()}"
+_HIDDEN = []
+
+
+def _hide(*values):
+    for value in values:
+        if value and value not in _HIDDEN:
+            _HIDDEN.append(value)
 
 
 def _say(message):
@@ -38,6 +64,40 @@ def _redact(text, *secrets_to_hide):
         if secret:
             redacted = redacted.replace(secret, "***")
     return redacted
+
+
+def _diagnostic(completed, secret_values):
+    """Return a non-zero launch result without its command line or secrets."""
+    rendered = "exit={}\n{}{}".format(
+        completed.returncode,
+        completed.stdout or "",
+        completed.stderr or "",
+    )
+    return _redact(rendered, *secret_values)
+
+
+def _controlled_process_env(child_env):
+    """Environment for a Docker client. Inherited credentials are removed."""
+    process_env = os.environ.copy()
+    for key in list(process_env):
+        if key in _CREDENTIAL_KEYS or key.startswith("AWS_"):
+            process_env.pop(key, None)
+    process_env.update(child_env)
+    return process_env
+
+
+def _env_name_options(flag, names, process_env):
+    """Pass variable names only. Docker reads the values from process_env."""
+    missing = [name for name in names if name not in process_env]
+    if missing:
+        raise SystemExit(
+            "Refusing to launch. Missing environment names: "
+            + ", ".join(sorted(missing))
+        )
+    options = []
+    for name in names:
+        options.extend([flag, name])
+    return options
 
 
 def _free_port():
@@ -100,30 +160,32 @@ def _wait_until_ready(container):
     raise SystemExit("PostgreSQL did not become ready inside the container.")
 
 
-def _psql(container, admin_password, sql):
+def _psql(container, admin_password, sql, extra_secrets=()):
+    process_env = _controlled_process_env({"PGPASSWORD": admin_password})
+    command = [
+        "docker",
+        "exec",
+        *_env_name_options("-e", ["PGPASSWORD"], process_env),
+        "-i",
+        container,
+        "psql",
+        "-U",
+        ADMIN_USER,
+        "-d",
+        ADMIN_DATABASE,
+        "-v",
+        "ON_ERROR_STOP=1",
+    ]
     completed = _run(
-        [
-            "docker",
-            "exec",
-            "-e",
-            f"PGPASSWORD={admin_password}",
-            "-i",
-            container,
-            "psql",
-            "-U",
-            ADMIN_USER,
-            "-d",
-            ADMIN_DATABASE,
-            "-v",
-            "ON_ERROR_STOP=1",
-        ],
+        command,
         input=sql,
         capture_output=True,
+        env=process_env,
     )
     if completed.returncode != 0:
         raise SystemExit(
             "Database setup failed.\n"
-            + _redact(completed.stderr, admin_password)
+            + _diagnostic(completed, [admin_password, *extra_secrets])
         )
 
 
@@ -149,12 +211,12 @@ def _lock_down_authentication(container, admin_password):
 
 
 def _server_facts(container, admin_password):
+    process_env = _controlled_process_env({"PGPASSWORD": admin_password})
     completed = _run(
         [
             "docker",
             "exec",
-            "-e",
-            f"PGPASSWORD={admin_password}",
+            *_env_name_options("-e", ["PGPASSWORD"], process_env),
             container,
             "psql",
             "-U",
@@ -169,11 +231,12 @@ def _server_facts(container, admin_password):
             "FROM pg_hba_file_rules ORDER BY line_number",
         ],
         capture_output=True,
+        env=process_env,
     )
     if completed.returncode != 0:
         raise SystemExit(
             "Could not read PostgreSQL server facts.\n"
-            + _redact(completed.stderr, admin_password)
+            + _diagnostic(completed, [admin_password])
         )
     lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
     if not lines:
@@ -192,6 +255,86 @@ def _remove_container(container):
     _run(["docker", "rm", "-f", "-v", container], capture_output=True)
 
 
+def _refuse_original_venv(path_value):
+    candidate = Path(path_value)
+    original_python = _ORIGINAL_VENV / "Scripts" / "python.exe"
+    for original in (_ORIGINAL_VENV, original_python):
+        try:
+            if candidate.resolve() == original.resolve():
+                raise SystemExit("Refusing the original virtual environment.")
+        except OSError:
+            continue
+
+
+def _postgres_container_launch(port, admin_password):
+    """Start PostgreSQL. The password stays in the client environment."""
+    child_env = {
+        "POSTGRES_USER": ADMIN_USER,
+        "POSTGRES_PASSWORD": admin_password,
+        "POSTGRES_DB": ADMIN_DATABASE,
+        "POSTGRES_HOST_AUTH_METHOD": "scram-sha-256",
+    }
+    process_env = _controlled_process_env(child_env)
+    command = [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        CONTAINER,
+        "--publish",
+        f"{HOST_BIND}:{port}:5432",
+        *_env_name_options("--env", list(child_env), process_env),
+        IMAGE,
+    ]
+    return command, process_env
+
+
+def _django_command(args, child_env, process_env):
+    """Run Django with the upgraded interpreter, never the original venv."""
+    image = os.environ.get("PHOENIX_VANZ_DOCKER_IMAGE", "").strip()
+    if image:
+        venv = os.environ.get("PHOENIX_VANZ_VENV", "").strip()
+        if not venv:
+            raise SystemExit(
+                "PHOENIX_VANZ_VENV must name the upgraded virtual environment."
+            )
+        _refuse_original_venv(venv)
+        command = [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            f"container:{CONTAINER}",
+            "-v",
+            f"{ROOT}:/work",
+            "-v",
+            f"{venv}:/opt/venv",
+            "-w",
+            "/work",
+            "-e",
+            "AWS_EC2_METADATA_DISABLED=true",
+            "-e",
+            "AWS_SHARED_CREDENTIALS_FILE=/aws-missing/credentials",
+            "-e",
+            "AWS_CONFIG_FILE=/aws-missing/config",
+            *_env_name_options("-e", list(child_env), process_env),
+            image,
+            "/opt/venv/bin/python",
+            *args,
+        ]
+        return command, f"docker:{image} venv={venv}"
+
+    python = os.environ.get("PHOENIX_VANZ_PYTHON", "").strip()
+    if not python:
+        raise SystemExit(
+            "Set PHOENIX_VANZ_DOCKER_IMAGE and PHOENIX_VANZ_VENV, "
+            "or PHOENIX_VANZ_PYTHON, to the upgraded interpreter. "
+            "The original ../venv interpreter is not used."
+        )
+    _refuse_original_venv(python)
+    return [python, *args], python
+
+
 def main():
     existing = _run(
         ["docker", "ps", "-aq", "--filter", f"name=^{CONTAINER}$"],
@@ -203,32 +346,19 @@ def main():
     port = _free_port()
     admin_password = secrets.token_urlsafe(24)
     app_password = secrets.token_urlsafe(24)
+    _hide(admin_password, app_password)
     created = False
     try:
+        postgres_command, postgres_env = _postgres_container_launch(port, admin_password)
         started = _run(
-            [
-                "docker",
-                "run",
-                "-d",
-                "--name",
-                CONTAINER,
-                "--publish",
-                f"{HOST_BIND}:{port}:5432",
-                "--env",
-                f"POSTGRES_USER={ADMIN_USER}",
-                "--env",
-                f"POSTGRES_PASSWORD={admin_password}",
-                "--env",
-                f"POSTGRES_DB={ADMIN_DATABASE}",
-                "--env",
-                "POSTGRES_HOST_AUTH_METHOD=scram-sha-256",
-                IMAGE,
-            ],
+            postgres_command,
             capture_output=True,
+            env=postgres_env,
         )
         if started.returncode != 0:
             raise SystemExit(
-                "Could not start PostgreSQL.\n" + _redact(started.stderr, admin_password)
+                "Could not start PostgreSQL.\n"
+                + _diagnostic(started, [admin_password, app_password])
             )
         created = True
         _wait_until_ready(CONTAINER)
@@ -242,6 +372,7 @@ def main():
             CREATE ROLE {APP_USER} LOGIN PASSWORD '{app_password}' CREATEDB NOSUPERUSER;
             GRANT CONNECT ON DATABASE {APP_DATABASE} TO {APP_USER};
             """,
+            extra_secrets=(app_password,),
         )
         _say(f"image={IMAGE}")
         _say(f"server_version={version}")
@@ -255,43 +386,39 @@ def main():
         _say(f"test_name={TEST_DATABASE}")
         _say(f"user={APP_USER}")
 
-        child_env = os.environ.copy()
-        for key in (
-            "DATABASE_URL",
-            "PGHOST",
-            "PGPORT",
-            "PGUSER",
-            "PGPASSWORD",
-            "PGDATABASE",
-            "PGPASSFILE",
-        ):
-            child_env.pop(key, None)
-        child_env.update(
-            {
-                "DJANGO_SETTINGS_MODULE": "base.settings_postgres_tests",
-                "PHOENIX_VANZ_POSTGRES_TESTS": "1",
-                "PHOENIX_VANZ_POSTGRES_HOST": HOST_BIND,
-                "PHOENIX_VANZ_POSTGRES_PORT": str(port),
-                "PHOENIX_VANZ_POSTGRES_NAME": APP_DATABASE,
-                "PHOENIX_VANZ_POSTGRES_TEST_NAME": TEST_DATABASE,
-                "PHOENIX_VANZ_POSTGRES_USER": APP_USER,
-                "PHOENIX_VANZ_POSTGRES_PASSWORD": app_password,
-            }
-        )
-        python = str(ROOT.parent / "venv" / "Scripts" / "python.exe")
+        docker_image = os.environ.get("PHOENIX_VANZ_DOCKER_IMAGE", "").strip()
+        django_port = "5432" if docker_image else str(port)
+        child_env = {
+            "DJANGO_SETTINGS_MODULE": "base.settings_postgres_tests",
+            "PHOENIX_VANZ_POSTGRES_TESTS": "1",
+            "PHOENIX_VANZ_POSTGRES_HOST": HOST_BIND,
+            "PHOENIX_VANZ_POSTGRES_PORT": django_port,
+            "PHOENIX_VANZ_POSTGRES_NAME": APP_DATABASE,
+            "PHOENIX_VANZ_POSTGRES_TEST_NAME": TEST_DATABASE,
+            "PHOENIX_VANZ_POSTGRES_USER": APP_USER,
+            "PHOENIX_VANZ_POSTGRES_PASSWORD": app_password,
+            "PYTHONUNBUFFERED": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "AWS_EC2_METADATA_DISABLED": "true",
+        }
+        host_env = _controlled_process_env(child_env)
+        _say(f"django_port={django_port}")
         _say("RUN orders")
-        orders = _run(
-            [python, "manage.py", "test", "orders", "--verbosity", "2"],
-            cwd=ROOT,
-            env=child_env,
+        orders_command, interpreter = _django_command(
+            ["manage.py", "test", "orders", "--verbosity", "2"],
+            child_env,
+            host_env,
         )
+        _say(f"interpreter={interpreter}")
+        orders = _run(orders_command, cwd=ROOT, env=host_env)
         _say(f"orders_exit={orders.returncode}")
         _say("RUN full")
-        full = _run(
-            [python, "manage.py", "test", "--verbosity", "1"],
-            cwd=ROOT,
-            env=child_env,
+        full_command, _interpreter = _django_command(
+            ["manage.py", "test", "--verbosity", "1"],
+            child_env,
+            host_env,
         )
+        full = _run(full_command, cwd=ROOT, env=host_env)
         _say(f"full_exit={full.returncode}")
         if orders.returncode != 0 or full.returncode != 0:
             raise SystemExit(
@@ -306,7 +433,11 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except SystemExit:
+    except SystemExit as exc:
+        if isinstance(exc.code, str):
+            raise SystemExit(_redact(exc.code, *_HIDDEN)) from None
         raise
     except Exception as exc:
-        raise SystemExit(f"PostgreSQL verification stopped: {exc}") from exc
+        raise SystemExit(
+            _redact(f"PostgreSQL verification stopped: {exc}", *_HIDDEN)
+        ) from None
