@@ -16,6 +16,8 @@ from django.contrib.auth.models import User
 from django.db import IntegrityError, connection, transaction
 from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
+
+from base.test_support import PLAIN_STATIC_BACKEND, isolated_storages
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
@@ -254,7 +256,7 @@ class GuestSessionTransactionTests(TransactionTestCase):
 
 class GuestSessionAdminTests(TestCase):
     @override_settings(
-        STATICFILES_STORAGE="django.contrib.staticfiles.storage.StaticFilesStorage"
+        STORAGES=isolated_storages(staticfiles_backend=PLAIN_STATIC_BACKEND)
     )
     def test_cart_admin_cannot_rewrite_the_guest_session(self):
         issued = issue_guest_cart()

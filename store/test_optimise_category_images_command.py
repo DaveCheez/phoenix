@@ -7,6 +7,8 @@ from django.core.management import call_command
 from django.test import TestCase, override_settings
 from PIL import Image
 
+from base.test_support import isolated_storages
+
 from .models import Category, CategoryImage
 
 
@@ -28,9 +30,7 @@ class OptimiseCategoryImagesCommandTests(TestCase):
 
         self.storage_override = override_settings(
             MEDIA_ROOT=self.media_directory.name,
-            DEFAULT_FILE_STORAGE=(
-                "django.core.files.storage.FileSystemStorage"
-            ),
+            STORAGES=isolated_storages(),
         )
         self.storage_override.enable()
 

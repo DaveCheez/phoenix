@@ -4,6 +4,8 @@ from html.parser import HTMLParser
 from django.contrib.admin.sites import AdminSite
 from django.contrib.auth.models import User
 from django.test import RequestFactory, TestCase, override_settings
+
+from base.test_support import PLAIN_STATIC_BACKEND, isolated_storages
 from django.urls import reverse
 
 from .admin import (
@@ -92,7 +94,7 @@ class OrderAdminInspectionTests(TestCase):
         self.assertEqual(option_inline.readonly_fields, option_inline.fields)
 
     @override_settings(
-        STATICFILES_STORAGE="django.contrib.staticfiles.storage.StaticFilesStorage"
+        STORAGES=isolated_storages(staticfiles_backend=PLAIN_STATIC_BACKEND)
     )
     def test_admin_post_cannot_change_financial_or_status_fields(self):
         self.client.force_login(self.user)

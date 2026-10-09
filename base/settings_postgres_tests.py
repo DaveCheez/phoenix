@@ -97,6 +97,13 @@ CACHES = {
         "LOCATION": "phoenix-vanz-postgres-tests",
     }
 }
-DEFAULT_FILE_STORAGE = "django.core.files.storage.FileSystemStorage"
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 MEDIA_ROOT = Path(tempfile.mkdtemp(prefix="phoenix-vanz-pgtest-media-"))
 MEDIA_URL = "/media/"
