@@ -220,8 +220,10 @@ Django start route. The Django counters can be enabled only with approved
 numerical policies. ``POST /api/cart/budget/`` is the Django check Nuxt must
 call for CSRF and reset; the Nuxt handler itself is still pending. Still
 required before release: those quotas, the Nuxt calls in the order above,
-forwarding ``Retry-After`` through the frontend, scheduling and monitoring
-for ``cart_rate_limit_maintenance``, and a coordinated cutover. A request
+forwarding ``Retry-After`` through the frontend, the still-unactivated
+cleanup schedule and monitors described in
+[cart counter maintenance](cart-counter-maintenance.md), and a coordinated
+cutover. A request
 rejected by the application gate is not in these budgets.
 
 The business owner has approved the basket cutover. Historical anonymous

@@ -156,16 +156,163 @@ output does not include the exception, SQL text, or a connection string.
 Programming errors that are not a missing counter table are not turned
 into a successful summary.
 
-## Later scheduling
+## Proposed schedule
 
-Before this command is put on a timer, operators still need to:
+Nothing in this repository starts this command. The checked-in App Platform
+examples (`.do/app.yaml` and `.do/app-production.example.yaml`) contain one
+`PRE_DEPLOY` migrate job and the `django-api` service. They do not contain a
+scheduled cleanup job. Those files are templates: they pin
+`DaveCheez/pheonix` on `main`, `source_dir: /`, the Python buildpack
+(`environment_slug: python`, `runtime.txt` is Python 3.11.15), and
+`buildpack-stack=ubuntu-22`. There is no Dockerfile. They are not a copy of
+a verified live app.
 
-- record when a run last completed with `success` true;
-- watch `observed_eligible_backlog` and `oldest_expired_age_seconds` across runs;
-- alert when a run fails or no run is recorded;
-- choose the cadence, batch size, and batch cap from the rate at which rows are created and from the backlog that remains;
-- treat a scheduler success as incomplete when the JSON still reports a backlog;
-- set operational timeouts outside this command before any production schedule.
+`manage.py` is at the root of this backend git repository. The template's
+`source_dir: /` matches that layout. A future job must use the same
+repository, branch, and deployment as the API that is being released. Do not
+point it at `feature/order-foundation` or any other unmerged branch. App
+Platform builds each component from that source. This plan does not claim the
+job reuses the API container image.
 
-No App Platform job, cron, or worker is configured by this repository for
-that work.
+The existing `migrate` pre-deploy job is what applies schema, including
+`cart_cartratelimitcounter`, before a deployment is considered live. Cleanup
+must not be the process that creates that table. A scheduled run belongs to
+the deployment that already migrated.
+
+The template puts environment variables on the app, and DigitalOcean
+documents app-level variables as available to every component, with a
+component-level variable of the same name winning. Variables set only on
+`django-api` are not assumed to appear on a new job. Live values were not
+read for this plan. Before any activation, confirm the job process itself
+has these names:
+
+- `DJANGO_SECRET_KEY` — required when `DEBUG_SETTING` is false, or Django
+  refuses to start.
+- `DEBUG_SETTING` — `False` for this job.
+- `DATABASE_URL` — selects PostgreSQL. If it is absent, Django uses the
+  container's ephemeral SQLite file and will not see the real counters.
+
+The command does not read the cart HMAC key, application credential, or rate
+limit policies. Do not copy payment, mail, or Spaces secrets onto the job
+unless a staging boot shows Django cannot load without them. With
+`DEBUG_SETTING` false, media settings are imported and accept empty defaults.
+
+Proposed command, for review only:
+
+```yaml
+# NOT ACTIVATED. Do not paste this into .do/app.yaml until the rollout below
+# is approved. Values are proposals.
+jobs:
+  - name: cart-counter-maintenance
+    kind: SCHEDULED
+    schedule:
+      cron: "*/15 * * * *"
+      time_zone: UTC
+    environment_slug: python
+    github:
+      repo: DaveCheez/pheonix
+      branch: main
+      deploy_on_push: true
+    source_dir: /
+    run_command: >-
+      python manage.py cart_rate_limit_maintenance
+      --delete-expired --batch-size 500 --max-batches 10
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-0.5gb
+```
+
+That cron expression is every 15 minutes, which is the minimum interval
+DigitalOcean documents for scheduled jobs. `instance_count: 1` is the
+proposal so one tick does not start several copies. Whether the platform
+waits for a previous invocation before starting the next one is not
+documented here and is unresolved. The command itself tolerates overlap.
+
+DigitalOcean documents that scheduled jobs are not routable, are billed only
+while running, can be listed from the Activity tab and
+`GET /v2/apps/{app_id}/job-invocations`, and can raise a "Failed job
+invocation" alert. The checked-in spec enables only `DEPLOYMENT_FAILED` and
+`DOMAIN_FAILED`. It has no log forwarding destination. The published job
+object includes `termination.grace_period_seconds` (default 120, maximum
+600), which is the wait between TERM and KILL, not a maximum runtime.
+DigitalOcean also says a job deployment timeout can be configured and
+defaults to 30 minutes. This pass did not find that timeout's field name on
+the published jobs object, so no timeout field is proposed. Overlap control
+and automatic retry of a failed invocation are likewise undocumented and
+unresolved.
+
+The batch cap is still not a deadline. Two limits are proposed and not
+implemented:
+
+- Process deadline: once its spec field is identified, set the job's
+  deployment timeout to 10 minutes. The documented default is 30 minutes.
+  `termination.grace_period_seconds` does not provide that deadline.
+- Database: PostgreSQL `statement_timeout` of 30 seconds and `lock_timeout`
+  of 10 seconds on this job's connection only. Django's current database
+  settings do not set either. Do not change the cluster-wide parameters in
+  order to bound this command.
+
+## Monitoring proposal
+
+Three different failures need three different checks. None of them is
+running.
+
+1. Failed invocation. The process exits non-zero, the container fails to
+   start, or the platform stops it. DigitalOcean documents a "Failed job
+   invocation" alert, delivered by email or Slack. That is the smallest
+   detector for this case. It does not, by itself, notice a job that never
+   started, and it does not read the JSON backlog. The checked-in spec does
+   not enable this alert. The recipient is not chosen here.
+
+2. Missing invocation. The 15-minute schedule produced no completed run.
+   No checked-in monitor compares invocation history with the clock. The
+   smallest next step is a separate read of `job-invocations` for
+   `cart-counter-maintenance`: alert when the newest completed invocation is
+   older than 20 minutes. Twenty minutes is one missed slot plus a short
+   grace, not an approved setting. Store that observation outside this
+   Django process. Do not treat a quiet API as proof the cleanup ran.
+
+3. Persistent backlog. Runs finish, including with `success` true, while
+   expired rows remain or get older. A platform success is not an empty
+   backlog. Read the JSON on stdout:
+
+   - `rows_deleted` is only work a delete call confirmed.
+   - `batches_attempted` includes a call that started and then raised.
+   - `backlog_observation_capped` true means `observed_eligible_backlog` is
+     5000 and only a lower bound.
+   - `stop_reason` `batch_limit_reached` can leave rows behind. Look at the
+     observed backlog; do not treat the stop reason as "clean".
+   - After an error, backlog fields are null. Null is unknown, not zero.
+
+   Proposed thresholds, not approved: alert when two consecutive successful
+   runs still have `observed_eligible_backlog` greater than 0 and
+   `oldest_expired_age_seconds` greater than 3600, or when any run reports
+   `backlog_observation_capped` true. An hour is much longer than the
+   15-minute cadence and is a sign the cap is not keeping up. No service is
+   connected to parse this JSON yet.
+
+## Rollout
+
+Do this in order. Stopping later at any step leaves the API's cart
+authentication and the existing counters unchanged.
+
+1. Keep the maintenance command and this write-up free of a schedule. The
+   command commit does not activate a job.
+2. Deploy the candidate release to staging and confirm `migrate` has created
+   the counter table.
+3. Run `cart_rate_limit_maintenance` with no flags, or with `--dry-run`, and
+   read one JSON object.
+4. Run one staging `--delete-expired` against known expired fixture rows.
+   Confirm active counters, guest sessions, carts, and orders are unchanged.
+5. Prove the three monitors above against a forced non-zero exit, a skipped
+   slot, and a run that stops on `batch_limit_reached` with rows still
+   present.
+6. Approve the cadence, batch size, batch cap, the 10-minute process
+   deadline, the database timeouts, the expected cost, and who receives
+   alerts.
+7. Add the scheduled job only as part of the coordinated production release
+   of that same revision.
+
+Destroying the job component stops the schedule. It does not turn cart
+authentication off, and it does not reset or restore counters. Do not restore
+a database backup just to undo a counter delete. Cleanup never writes guest
+sessions, carts, or orders.
