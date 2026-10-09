@@ -1,14 +1,21 @@
+import os
+import subprocess
+import sys
+import textwrap
+from pathlib import Path
 from unittest.mock import patch
 
 from django.contrib import admin
+from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.exceptions import ImproperlyConfigured
 from django.db import DatabaseError
-from django.test import RequestFactory, override_settings
+from django.test import Client, RequestFactory, override_settings
 from django.urls import reverse
 from rest_framework.test import APITestCase
 
 from base.contact_config import (
+    parse_boolean_setting,
     validate_contact_proxy_secret,
     validate_production_email_configuration,
 )
@@ -450,6 +457,78 @@ class ContactEnquiryAPITests(APITestCase):
         self.assertEqual(response.status_code, 405)
         self.assertEqual(response.data["detail"], 'Method "GET" not allowed.')
 
+    @override_settings(CONTACT_EMAIL_ENABLED=False)
+    def test_disabled_email_saves_enquiry_without_calling_delivery(self):
+        with patch("store.views.send_enquiry_email") as send_email:
+            response = self.post_enquiry()
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            response.data,
+            {
+                "success": True,
+                "code": "ENQUIRY_RECEIVED",
+                "message": "Your enquiry has been received.",
+                "reference": response.data["reference"],
+            },
+        )
+        self.assertRegex(
+            response.data["reference"],
+            r"^PV-\d{8}-[A-F0-9]{16}$",
+        )
+        enquiry = Enquiry.objects.get()
+        self.assertEqual(enquiry.reference, response.data["reference"])
+        self.assertEqual(enquiry.email_status, Enquiry.EmailStatus.PENDING)
+        self.assertIsNone(enquiry.email_sent_at)
+        self.assertEqual(enquiry.email_error, "")
+        self.assertEqual(len(mail.outbox), 0)
+        send_email.assert_not_called()
+
+        browser = Client()
+        anonymous = browser.get(reverse("admin:store_enquiry_changelist"))
+        self.assertEqual(anonymous.status_code, 302)
+        self.assertIn("/admin/login/", anonymous.url)
+        staff = get_user_model().objects.create_superuser(
+            "enquiry-admin",
+            "enquiry-admin@example.com",
+            "enquiry-admin-password",
+        )
+        staff_request = RequestFactory().get("/admin/store/enquiry/")
+        staff_request.user = staff
+        model_admin = EnquiryAdmin(Enquiry, admin.site)
+        self.assertTrue(model_admin.has_view_permission(staff_request))
+        visible = model_admin.get_queryset(staff_request).get()
+        self.assertEqual(visible.reference, enquiry.reference)
+        self.assertEqual(visible.email_status, Enquiry.EmailStatus.PENDING)
+        self.assertIsNone(visible.email_sent_at)
+
+    @override_settings(CONTACT_EMAIL_ENABLED=False)
+    def test_disabled_email_rejects_invalid_input_without_success(self):
+        with patch("store.views.send_enquiry_email") as send_email:
+            response = self.post_enquiry({**VALID_ENQUIRY, "email": "invalid"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["success"], False)
+        self.assertEqual(Enquiry.objects.count(), 0)
+        self.assertEqual(len(mail.outbox), 0)
+        send_email.assert_not_called()
+
+    @override_settings(CONTACT_EMAIL_ENABLED=False)
+    def test_disabled_email_does_not_return_success_when_save_fails(self):
+        with (
+            patch(
+                "store.views.ContactEnquirySerializer.save",
+                side_effect=DatabaseError("persistence failed"),
+            ),
+            patch("store.views.send_enquiry_email") as send_email,
+        ):
+            with self.assertRaises(DatabaseError):
+                self.post_enquiry()
+
+        self.assertEqual(Enquiry.objects.count(), 0)
+        self.assertEqual(len(mail.outbox), 0)
+        send_email.assert_not_called()
+
     def test_enquiry_admin_evidence_is_read_only_and_creation_is_disabled(self):
         model_admin = EnquiryAdmin(Enquiry, admin.site)
         request = RequestFactory().get("/admin/store/enquiry/")
@@ -539,3 +618,90 @@ class ContactProductionConfigurationTests(APITestCase):
                 }
                 with self.assertRaises(ImproperlyConfigured):
                     validate_production_email_configuration(**configuration)
+
+    def test_boolean_setting_accepts_only_real_booleans(self):
+        for value in (True, "true", "True", "1", "yes", "on"):
+            with self.subTest(value=value):
+                self.assertIs(
+                    parse_boolean_setting(value, setting_name="CONTACT_EMAIL_ENABLED"),
+                    True,
+                )
+        for value in (False, "false", "False", "0", "no", "off"):
+            with self.subTest(value=value):
+                self.assertIs(
+                    parse_boolean_setting(value, setting_name="CONTACT_EMAIL_ENABLED"),
+                    False,
+                )
+        with self.assertRaises(ImproperlyConfigured):
+            parse_boolean_setting("maybe", setting_name="CONTACT_EMAIL_ENABLED")
+
+    def test_disabled_email_skips_only_the_email_configuration_requirement(self):
+        validate_production_email_configuration(
+            debug=False,
+            email_backend="",
+            email_host="",
+            email_port=0,
+            email_use_tls=False,
+            email_use_ssl=False,
+            email_host_user="",
+            email_host_password="",
+            default_from_email="",
+            contact_recipient_email="",
+            contact_email_enabled=False,
+        )
+        with self.assertRaises(ImproperlyConfigured):
+            validate_contact_proxy_secret(debug=False, secret="")
+
+    def test_production_boots_with_email_disabled_and_no_email_configuration(self):
+        completed = _boot_contact_settings(
+            {
+                "CONTACT_EMAIL_ENABLED": "false",
+                "CONTACT_PROXY_SECRET": "contact-save-only-proxy-not-production",
+            }
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("email_enabled=False", completed.stdout)
+        self.assertIn("booted", completed.stdout)
+
+    def test_disabled_email_still_requires_the_contact_proxy_secret(self):
+        completed = _boot_contact_settings({"CONTACT_EMAIL_ENABLED": "false"})
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("CONTACT_PROXY_SECRET", completed.stderr)
+        self.assertNotIn("EMAIL_BACKEND", completed.stderr)
+
+
+def _boot_contact_settings(extra):
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "DJANGO_SETTINGS_MODULE": "base.settings",
+        "DEBUG_SETTING": "False",
+        "DJANGO_SECRET_KEY": "contact-save-only-test-not-a-production-secret",
+        "AWS_EC2_METADATA_DISABLED": "true",
+        "AWS_SHARED_CREDENTIALS_FILE": "/aws-missing/credentials",
+        "AWS_CONFIG_FILE": "/aws-missing/config",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    env.update(extra)
+    script = textwrap.dedent(
+        """
+        import django
+        from django.conf import settings
+
+        settings.DATABASES["default"] = {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": ":memory:",
+        }
+        django.setup()
+        print("email_enabled=" + str(settings.CONTACT_EMAIL_ENABLED))
+        print("booted")
+        """
+    )
+    return subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parent.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
