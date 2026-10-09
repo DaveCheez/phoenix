@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     CategoryDetailAPI,
     CategoryListAPI,
+    ContactEnquiryAPI,
     HomeSlideListAPI,
     ProductDetailAPI,
     ProductListAPI,
@@ -25,4 +26,5 @@ urlpatterns = [
     ),
     path("reviews/", ReviewListAPI.as_view(), name="review-list-api"),
     path("slides/", HomeSlideListAPI.as_view(), name="home-slide-list-api"),
+    path("contact/", ContactEnquiryAPI.as_view(), name="contact-enquiry-api"),
 ]

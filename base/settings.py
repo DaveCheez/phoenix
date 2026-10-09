@@ -3,6 +3,11 @@ from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
 
+from base.contact_config import (
+    DEVELOPMENT_CONTACT_PROXY_SECRET,
+    validate_contact_proxy_secret,
+    validate_production_email_configuration,
+)
 from base.env import config
 
 
@@ -204,3 +209,41 @@ SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
+
+EMAIL_BACKEND = config(
+    "EMAIL_BACKEND",
+    default=(
+        "django.core.mail.backends.console.EmailBackend"
+        if DEBUG
+        else ""
+    ),
+)
+EMAIL_HOST = config("EMAIL_HOST", default="localhost" if DEBUG else "")
+EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
+EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=True, cast=bool)
+EMAIL_USE_SSL = config("EMAIL_USE_SSL", default=False, cast=bool)
+EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
+DEFAULT_FROM_EMAIL = config(
+    "DEFAULT_FROM_EMAIL",
+    default="webmaster@localhost" if DEBUG else "",
+)
+CONTACT_RECIPIENT_EMAIL = config("CONTACT_RECIPIENT_EMAIL", default="")
+CONTACT_PROXY_SECRET = config(
+    "CONTACT_PROXY_SECRET",
+    default=DEVELOPMENT_CONTACT_PROXY_SECRET if DEBUG else "",
+)
+
+validate_contact_proxy_secret(debug=DEBUG, secret=CONTACT_PROXY_SECRET)
+validate_production_email_configuration(
+    debug=DEBUG,
+    email_backend=EMAIL_BACKEND,
+    email_host=EMAIL_HOST,
+    email_port=EMAIL_PORT,
+    email_use_tls=EMAIL_USE_TLS,
+    email_use_ssl=EMAIL_USE_SSL,
+    email_host_user=EMAIL_HOST_USER,
+    email_host_password=EMAIL_HOST_PASSWORD,
+    default_from_email=DEFAULT_FROM_EMAIL,
+    contact_recipient_email=CONTACT_RECIPIENT_EMAIL,
+)
