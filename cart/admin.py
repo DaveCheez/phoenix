@@ -25,6 +25,9 @@ class CartItemOptionInline(admin.TabularInline):
 @admin.register(Cart)
 class CartAdmin(admin.ModelAdmin):
     list_display = ["id", "user", "created_at"]
+    # The guest-session link is not an admin field. A posted value is ignored.
+    # GuestSession itself is not registered.
+    exclude = ("guest_session",)
 
 
 @admin.register(CartItem)

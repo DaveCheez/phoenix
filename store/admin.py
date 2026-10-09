@@ -7,7 +7,7 @@ from nested_admin.formsets import NestedInlineFormSet
 
 from .models import (
     Product, Category, ProductImage, CategoryImage,
-    ProductOption, ProductOptionGroup, Review, HomeSlide
+    ProductOption, ProductOptionGroup, Review, HomeSlide, Enquiry
 )
 
 # --- INLINE ADMIN CLASSES ---
@@ -153,6 +153,41 @@ class ReviewAdmin(admin.ModelAdmin):
     list_display = ['name', 'created_at']
     search_fields = ['name', 'content']
     ordering = ['-created_at']
+
+
+@admin.register(Enquiry)
+class EnquiryAdmin(admin.ModelAdmin):
+    list_display = ["reference", "name", "email", "created_at", "email_status"]
+    list_filter = ["email_status", "created_at"]
+    search_fields = ["reference", "name", "email", "message"]
+    ordering = ["-created_at"]
+    readonly_fields = [
+        "reference",
+        "name",
+        "email",
+        "phone",
+        "message",
+        "source_url",
+        "created_at",
+        "email_status",
+        "email_sent_at",
+        "email_error",
+    ]
+    fields = [
+        "reference",
+        "created_at",
+        "name",
+        "email",
+        "phone",
+        "source_url",
+        "message",
+        "email_status",
+        "email_sent_at",
+        "email_error",
+    ]
+
+    def has_add_permission(self, request):
+        return False
 
 @admin.register(HomeSlide)
 class HomeSlideAdmin(admin.ModelAdmin):

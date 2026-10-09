@@ -1,17 +1,29 @@
+import logging
+
 from django.db.models import Prefetch, Q
 from django.shortcuts import get_object_or_404, render
 from django.utils import timezone
-from rest_framework import generics
+from rest_framework import generics, status
+from rest_framework.exceptions import ParseError, PermissionDenied, Throttled
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from .models import Category, HomeSlide, Product, ProductOption, ProductOptionGroup, Review
+from .enquiry_email import send_enquiry_email
+from .models import Category, Enquiry, HomeSlide, Product, ProductOption, ProductOptionGroup, Review
+from .permissions import ContactProxyPermission
 from .serializers import (
     CategorySerializer,
     CategoryWithProductsSerializer,
+    ContactEnquirySerializer,
     HomeSlideSerializer,
     ProductListSerializer,
     ProductSerializer,
     ReviewSerializer,
 )
+from .throttles import ContactEnquiryThrottle
+
+
+logger = logging.getLogger(__name__)
 
 
 def categories(request):
@@ -114,4 +126,131 @@ class HomeSlideListAPI(generics.ListAPIView):
             .filter(Q(starts_at__isnull=True) | Q(starts_at__lte=now))
             .filter(Q(ends_at__isnull=True) | Q(ends_at__gte=now))
             .order_by("display_order", "id")
+        )
+
+
+ENQUIRY_RECEIVED_MESSAGE = (
+    "Thanks — your enquiry has been received. We will get back to you shortly."
+)
+
+
+def _email_failure_category(exc):
+    max_length = Enquiry._meta.get_field("email_error").max_length
+    return type(exc).__name__[:max_length]
+
+
+def _persist_email_status(enquiry, *, email_status, email_sent_at, email_error):
+    try:
+        updated = Enquiry.objects.filter(pk=enquiry.pk).update(
+            email_status=email_status,
+            email_sent_at=email_sent_at,
+            email_error=email_error,
+        )
+        if updated != 1:
+            raise RuntimeError("Enquiry delivery status row was not updated")
+    except Exception:
+        logger.exception(
+            "contact_enquiry_status_update_failed",
+            extra={
+                "enquiry_reference": enquiry.reference,
+                "target_email_status": email_status,
+            },
+        )
+        return False
+
+    enquiry.email_status = email_status
+    enquiry.email_sent_at = email_sent_at
+    enquiry.email_error = email_error
+    return True
+
+
+class ContactEnquiryAPI(APIView):
+    authentication_classes = []
+    permission_classes = [ContactProxyPermission]
+    throttle_classes = [ContactEnquiryThrottle]
+
+    def handle_exception(self, exc):
+        if isinstance(exc, PermissionDenied):
+            return Response(
+                {
+                    "success": False,
+                    "code": "CONTACT_PROXY_FORBIDDEN",
+                    "error": "Contact request is not authorised.",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if isinstance(exc, Throttled):
+            return Response(
+                {
+                    "success": False,
+                    "code": "RATE_LIMITED",
+                    "error": (
+                        "Too many enquiries have been submitted. "
+                        "Please try again later."
+                    ),
+                },
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+        if isinstance(exc, ParseError):
+            return Response(
+                {
+                    "success": False,
+                    "code": "VALIDATION_ERROR",
+                    "error": "Please correct the highlighted fields.",
+                    "errors": {
+                        "non_field_errors": [
+                            "The request body is not valid JSON."
+                        ]
+                    },
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().handle_exception(exc)
+
+    def post(self, request):
+        serializer = ContactEnquirySerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "success": False,
+                    "code": "VALIDATION_ERROR",
+                    "error": "Please correct the highlighted fields.",
+                    "errors": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        enquiry = serializer.save()
+        response_code = "ENQUIRY_RECEIVED"
+
+        try:
+            send_enquiry_email(enquiry)
+        except Exception as exc:
+            logger.exception(
+                "contact_enquiry_email_delivery_failed",
+                extra={"enquiry_reference": enquiry.reference},
+            )
+            _persist_email_status(
+                enquiry,
+                email_status=Enquiry.EmailStatus.FAILED,
+                email_sent_at=None,
+                email_error=_email_failure_category(exc),
+            )
+            response_code = "ENQUIRY_SAVED_EMAIL_FAILED"
+        else:
+            _persist_email_status(
+                enquiry,
+                email_status=Enquiry.EmailStatus.SENT,
+                email_sent_at=timezone.now(),
+                email_error="",
+            )
+
+        return Response(
+            {
+                "success": True,
+                "code": response_code,
+                "message": ENQUIRY_RECEIVED_MESSAGE,
+                "reference": enquiry.reference,
+            },
+            status=status.HTTP_201_CREATED,
         )

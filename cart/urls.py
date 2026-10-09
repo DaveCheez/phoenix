@@ -1,9 +1,10 @@
 from django.urls import path
 
-from . import views
+from . import budget, views
 
 
 urlpatterns = [
+    path("budget/", budget.post_budget, name="cart_budget"),
     path("", views.get_cart, name="get_cart"),
     path("create/", views.create_cart, name="create_cart"),
     path("add/", views.add_to_cart, name="add_to_cart"),

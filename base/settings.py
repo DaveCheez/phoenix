@@ -3,6 +3,11 @@ from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
 
+from base.contact_config import (
+    DEVELOPMENT_CONTACT_PROXY_SECRET,
+    validate_contact_proxy_secret,
+    validate_production_email_configuration,
+)
 from base.env import config
 
 
@@ -49,12 +54,14 @@ INSTALLED_APPS = [
     "rest_framework",
     "accounts",
     "cart",
+    "orders.apps.OrdersConfig",
     "storages",
     "store",
 ]
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "cart.middleware.CartNoStoreMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -119,7 +126,17 @@ USE_TZ = True
 
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles-cdn"
-STATICFILES_STORAGE = "whitenoise.storage.CompressedManifestStaticFilesStorage"
+
+# Development keeps uploaded media on local disk. cdn.conf replaces this entire
+# mapping when DEBUG is off, so both aliases are defined there as well.
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
@@ -134,6 +151,34 @@ SITE_URL = config(
 ).rstrip("/")
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# HTTP_AUTHORIZATION and HTTP_COOKIE do not match Django's default sensitive-key
+# list, and cookie values are printed separately from request META.
+DEFAULT_EXCEPTION_REPORTER_FILTER = "cart.credential_reporting.CartExceptionReporterFilter"
+DEFAULT_EXCEPTION_REPORTER = "cart.credential_reporting.CartExceptionReporter"
+
+# Empty by default. Cart data routes fail closed until this is a 64-character
+# lowercase hex value. Catalogue, health and admin routes do not read it.
+CART_APP_CREDENTIAL = config("CART_APP_CREDENTIAL", default="")
+
+# Empty by default. Counter key helpers reject it when called. Cart routes do
+# not read it until enforcement is enabled. It is not the application credential.
+CART_RATE_LIMIT_HMAC_KEY = config("CART_RATE_LIMIT_HMAC_KEY", default="")
+
+# Disabled by default. A string such as "false" must not enable enforcement.
+CART_RATE_LIMIT_ENABLED = config("CART_RATE_LIMIT_ENABLED", default=False, cast=bool)
+
+# Empty until production quotas are approved. Cart routes parse this only
+# when enforcement is enabled. It stays the three cart scopes. Request
+# parameters cannot supply it.
+CART_RATE_LIMIT_POLICIES = config("CART_RATE_LIMIT_POLICIES", default="")
+
+# Empty until production quotas are approved. POST /api/cart/budget/ parses
+# this only when enforcement is enabled. Ordinary cart routes do not read it.
+CART_FRONTEND_RATE_LIMIT_POLICIES = config(
+    "CART_FRONTEND_RATE_LIMIT_POLICIES",
+    default="",
+)
 
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = csv_setting(
@@ -164,3 +209,41 @@ SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
+
+EMAIL_BACKEND = config(
+    "EMAIL_BACKEND",
+    default=(
+        "django.core.mail.backends.console.EmailBackend"
+        if DEBUG
+        else ""
+    ),
+)
+EMAIL_HOST = config("EMAIL_HOST", default="localhost" if DEBUG else "")
+EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
+EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=True, cast=bool)
+EMAIL_USE_SSL = config("EMAIL_USE_SSL", default=False, cast=bool)
+EMAIL_HOST_USER = config("EMAIL_HOST_USER", default="")
+EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default="")
+DEFAULT_FROM_EMAIL = config(
+    "DEFAULT_FROM_EMAIL",
+    default="webmaster@localhost" if DEBUG else "",
+)
+CONTACT_RECIPIENT_EMAIL = config("CONTACT_RECIPIENT_EMAIL", default="")
+CONTACT_PROXY_SECRET = config(
+    "CONTACT_PROXY_SECRET",
+    default=DEVELOPMENT_CONTACT_PROXY_SECRET if DEBUG else "",
+)
+
+validate_contact_proxy_secret(debug=DEBUG, secret=CONTACT_PROXY_SECRET)
+validate_production_email_configuration(
+    debug=DEBUG,
+    email_backend=EMAIL_BACKEND,
+    email_host=EMAIL_HOST,
+    email_port=EMAIL_PORT,
+    email_use_tls=EMAIL_USE_TLS,
+    email_use_ssl=EMAIL_USE_SSL,
+    email_host_user=EMAIL_HOST_USER,
+    email_host_password=EMAIL_HOST_PASSWORD,
+    default_from_email=DEFAULT_FROM_EMAIL,
+    contact_recipient_email=CONTACT_RECIPIENT_EMAIL,
+)

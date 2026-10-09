@@ -15,5 +15,13 @@ AWS_DEFAULT_ACL = "public-read"
 AWS_QUERYSTRING_AUTH = False
 AWS_S3_FILE_OVERWRITE = False
 
-# Static assets are served by WhiteNoise. Only user-uploaded media uses Spaces.
-DEFAULT_FILE_STORAGE = "cdn.backends.MediaRootS3BotoStorage"
+# Static assets stay on WhiteNoise. This module is imported with import *,
+# which replaces STORAGES wholesale, so the staticfiles alias is repeated here.
+STORAGES = {
+    "default": {
+        "BACKEND": "cdn.backends.MediaRootS3BotoStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}

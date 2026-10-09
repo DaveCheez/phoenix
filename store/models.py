@@ -1,9 +1,10 @@
+import secrets
 from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
-from django.db import models
+from django.db import IntegrityError, models, transaction
 from django.urls import reverse
 from django.utils import timezone
 
@@ -356,3 +357,71 @@ class HomeSlide(models.Model):
         if self.ends_at and self.ends_at < now:
             return False
         return True
+
+
+def generate_enquiry_reference():
+    date_part = timezone.localtime().strftime("%Y%m%d")
+    return f"PV-{date_part}-{secrets.token_hex(8).upper()}"
+
+
+class Enquiry(models.Model):
+    class EmailStatus(models.TextChoices):
+        PENDING = "pending", "Pending"
+        SENT = "sent", "Sent"
+        FAILED = "failed", "Failed"
+
+    reference = models.CharField(max_length=32, unique=True, editable=False)
+    name = models.CharField(max_length=120)
+    email = models.EmailField()
+    phone = models.CharField(max_length=50, blank=True)
+    message = models.TextField()
+    source_url = models.URLField(max_length=500, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    email_status = models.CharField(
+        max_length=16,
+        choices=EmailStatus.choices,
+        default=EmailStatus.PENDING,
+    )
+    email_sent_at = models.DateTimeField(blank=True, null=True)
+    email_error = models.CharField(max_length=120, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name_plural = "Enquiries"
+
+    def __str__(self):
+        return self.reference
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            self.reference = (
+                type(self).objects.only("reference").get(pk=self.pk).reference
+            )
+            return super().save(*args, **kwargs)
+
+        for _ in range(10):
+            candidate = generate_enquiry_reference()
+            self.reference = candidate
+            try:
+                # The nested atomic block creates a savepoint when save() is called
+                # inside a wider transaction. A uniqueness failure can therefore be
+                # retried without leaving that transaction unusable.
+                with transaction.atomic():
+                    return super().save(*args, **kwargs)
+            except IntegrityError:
+                if not type(self).objects.filter(reference=candidate).exists():
+                    raise
+                self.pk = None
+                self._state.adding = True
+
+        raise RuntimeError("Could not generate a unique enquiry reference")
+
+
+class ContactRateLimitBucket(models.Model):
+    identity_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    window_started_at = models.DateTimeField()
+    request_count = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.identity_hash

@@ -5,6 +5,8 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from PIL import Image
 
+from base.test_support import isolated_storages
+
 from .models import HomeSlide
 
 
@@ -38,9 +40,7 @@ class HomeSlideImageProcessingTests(TestCase):
 
         self.storage_override = override_settings(
             MEDIA_ROOT=self.media_directory.name,
-            DEFAULT_FILE_STORAGE=(
-                "django.core.files.storage.FileSystemStorage"
-            ),
+            STORAGES=isolated_storages(),
         )
         self.storage_override.enable()
 
