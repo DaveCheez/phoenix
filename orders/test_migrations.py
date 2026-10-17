@@ -18,7 +18,7 @@ class OrderMigrationUpgradeTests(TransactionTestCase):
     def test_upgrade_from_0001_preserves_a_large_whole_pound_order(self):
         executor = MigrationExecutor(connection)
         self.assertIn(
-            ("orders", "0005_orderitem_money_constraints"),
+            ("orders", "0006_order_guest_and_idempotency"),
             executor.loader.graph.nodes,
         )
         try:
@@ -86,10 +86,11 @@ class OrderMigrationUpgradeTests(TransactionTestCase):
         )
 
         executor.loader.build_graph()
-        executor.migrate([("orders", "0005_orderitem_money_constraints")])
+        executor.migrate([("orders", "0006_order_guest_and_idempotency")])
 
         stored = Order.objects.get(reference="PV-UPGRADE30000000")
         self.assertEqual(stored.pk, order.pk)
+        self.assertIsNone(stored.guest_session_id)
         self.assertFalse(stored.is_finalised)
         self.assertEqual(stored.full_total, Decimal("30000000.00"))
         self.assertEqual(stored.deposit_required, Decimal("10000000.00"))

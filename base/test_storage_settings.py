@@ -40,6 +40,9 @@ def _clean_env(debug_setting):
         "AWS_CONFIG_FILE": "/aws-missing/config",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
+    for name in ("SYSTEMROOT", "SystemRoot", "WINDIR"):
+        if os.environ.get(name):
+            env[name] = os.environ[name]
     return env
 
 

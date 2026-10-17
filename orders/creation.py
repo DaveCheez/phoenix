@@ -47,6 +47,7 @@ _EMAIL = EmailValidator()
 def create_order_from_cart(
     *,
     cart_id,
+    guest_session=None,
     customer_name,
     customer_email,
     customer_phone,
@@ -80,7 +81,18 @@ def create_order_from_cart(
         full_total = sum((line["line_total"] for line in lines), Decimal("0.00"))
         full_total = _exact_money(full_total)
         split = calculate_deposit(full_total)
-        order = _insert_order(cart=cart, customer=customer, full_total=full_total, split=split)
+        if guest_session is not None and cart.guest_session_id != guest_session.pk:
+            raise OrderCreationError(
+                "CART_ACCESS_UNAVAILABLE",
+                "Cart access is not available.",
+            )
+        order = _insert_order(
+            cart=cart,
+            customer=customer,
+            full_total=full_total,
+            split=split,
+            guest_session=guest_session,
+        )
         _insert_lines(order, lines)
         return order._mark_finalised()
 
@@ -292,7 +304,7 @@ def _exact_money(value):
     return value
 
 
-def _insert_order(*, cart, customer, full_total, split):
+def _insert_order(*, cart, customer, full_total, split, guest_session=None):
     """Insert one order, retrying only a reference-uniqueness collision."""
     for _attempt in range(REFERENCE_ATTEMPTS):
         reference = generate_order_reference()
@@ -315,6 +327,7 @@ def _insert_order(*, cart, customer, full_total, split):
                     deposit_required=split.deposit,
                     balance_on_completion=split.balance,
                     source_cart=cart,
+                    guest_session=guest_session,
                     **customer,
                 )
                 order.save()
