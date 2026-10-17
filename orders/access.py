@@ -91,10 +91,11 @@ def _replay(raw_token, key, digest):
             asserted_cart_id=None,
             for_update=True,
         )
-        attempt = (
-            OrderCreationAttempt.objects.select_for_update()
-            .select_related("order")
-            .get(guest_session=cart.guest_session, idempotency_key=key)
+        # Lock the attempt only. Joining the nullable order is an outer join,
+        # and PostgreSQL rejects FOR UPDATE on that nullable side.
+        attempt = OrderCreationAttempt.objects.select_for_update().get(
+            guest_session=cart.guest_session,
+            idempotency_key=key,
         )
         if attempt.request_hash != digest:
             raise IdempotencyConflict()

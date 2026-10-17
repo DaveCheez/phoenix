@@ -682,6 +682,9 @@ def _boot_contact_settings(extra):
         "AWS_CONFIG_FILE": "/aws-missing/config",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
+    for name in ("SYSTEMROOT", "SystemRoot", "WINDIR"):
+        if os.environ.get(name):
+            env[name] = os.environ[name]
     env.update(extra)
     script = textwrap.dedent(
         """
