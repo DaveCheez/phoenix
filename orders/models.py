@@ -29,7 +29,7 @@ from django.db.models.functions import Cast, Round
 from django.db.models.lookups import Exact
 
 from cart.configuration import build_configuration_signature
-from cart.models import Cart
+from cart.models import Cart, GuestSession
 from store.models import Product, ProductOption, ProductOptionGroup
 
 from .money import OrderMoneyError, calculate_deposit
@@ -92,6 +92,7 @@ class Order(models.Model):
         "payment_status",
         "job_status",
         "source_cart_id",
+        "guest_session_id",
         "is_finalised",
     )
 
@@ -153,6 +154,14 @@ class Order(models.Model):
         blank=True,
         on_delete=models.SET_NULL,
         related_name="snapshot_orders",
+    )
+    guest_session = models.ForeignKey(
+        GuestSession,
+        null=True,
+        blank=True,
+        editable=False,
+        on_delete=models.PROTECT,
+        related_name="orders",
     )
 
     class Meta:
@@ -572,3 +581,36 @@ def _validate_saved_snapshot(order):
         or order.payment_terms_text != Order.PAYMENT_TERMS_TEXT
     ):
         raise ValidationError("Orders use a one-third deposit.")
+
+
+class OrderCreationAttempt(models.Model):
+    """One guest's claim on an idempotency key. Not a second order.
+
+    The same guest and key always point at one attempt. A later, different
+    submission from the same basket uses a different key and can create
+    another order. ``source_cart`` stays non-unique.
+    """
+
+    guest_session = models.ForeignKey(
+        GuestSession,
+        on_delete=models.PROTECT,
+        related_name="order_creation_attempts",
+    )
+    idempotency_key = models.CharField(max_length=80)
+    request_hash = models.CharField(max_length=64, editable=False)
+    order = models.ForeignKey(
+        Order,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="creation_attempts",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("guest_session", "idempotency_key"),
+                name="order_creation_guest_key_uniq",
+            ),
+        ]
