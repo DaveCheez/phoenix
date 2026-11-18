@@ -20,6 +20,7 @@ from cart.test_application_client import (
 from .factories import build_catalogue
 from .models import Order, OrderCreationAttempt
 from .money import calculate_deposit
+from .review import review_token_for_cart
 
 
 _CUSTOMER = {
@@ -65,9 +66,14 @@ class PublicOrderTests(APITransactionTestCase):
     def _post(self, token, body=None, key="idem-key-1", **extra):
         headers = {"HTTP_AUTHORIZATION": f"Bearer {token}", "HTTP_IDEMPOTENCY_KEY": key}
         headers.update(extra)
+        if body is None:
+            body = {
+                **_CUSTOMER,
+                "cart_review_token": review_token_for_cart(self.issued.cart),
+            }
         return self.client.post(
             "/api/orders/",
-            _CUSTOMER if body is None else body,
+            body,
             format="json",
             **headers,
         )
@@ -164,7 +170,9 @@ class PublicOrderTests(APITransactionTestCase):
         item.save(update_fields=["configuration_signature"])
         response = self._post(self.issued.raw_token, key="stale-key-1")
         self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "CONFIGURATION_CONFLICT")
         self.assertFalse(Order.objects.exists())
+        self.assertFalse(OrderCreationAttempt.objects.exists())
 
 
 @unittest.skipUnless(
@@ -176,6 +184,10 @@ class PublicOrderPostgresTests(TransactionTestCase):
     def test_concurrent_same_key_creates_one_order(self):
         catalogue = build_catalogue()
         issued = _guest_cart(catalogue)
+        body = {
+            **_CUSTOMER,
+            "cart_review_token": review_token_for_cart(issued.cart),
+        }
         barrier = threading.Barrier(2)
         results = []
         errors = []
@@ -189,7 +201,7 @@ class PublicOrderPostgresTests(TransactionTestCase):
                 barrier.wait(15)
                 response = CartAPIClient().post(
                     "/api/orders/",
-                    _CUSTOMER,
+                    body,
                     format="json",
                     HTTP_AUTHORIZATION=f"Bearer {issued.raw_token}",
                     HTTP_IDEMPOTENCY_KEY="race-key-1",

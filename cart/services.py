@@ -36,11 +36,15 @@ def cart_items_queryset(cart: Cart):
 
 def cart_payload(cart: Cart) -> dict:
     """Build the public cart representation used by every cart endpoint."""
+    # Local import: order review imports cart services for stored-cart fallback.
+    from orders.review import canonical_line, canonical_option, review_token_for_canonical
+
     items = cart_items_queryset(cart)
 
     cart_total = Decimal("0.00")
     item_count = 0
     cart_items = []
+    reviewed_lines = []
 
     for item in items:
         selections = list(item.selected_options.all())
@@ -56,6 +60,26 @@ def cart_payload(cart: Cart) -> dict:
         line_total = configured_unit_price * item.quantity
         cart_total += line_total
         item_count += item.quantity
+        reviewed_lines.append(
+            canonical_line(
+                product_id=item.product.id,
+                product_name=item.product.name,
+                product_slug=item.product.slug,
+                quantity=item.quantity,
+                base=base_unit_price,
+                options_total=options_total,
+                configured=configured_unit_price,
+                line_total=line_total,
+                options=[
+                    canonical_option(
+                        selection.option,
+                        selection.option.price_adjustment or Decimal("0.00"),
+                        group=selection.group,
+                    )
+                    for selection in selections
+                ],
+            )
+        )
 
         cart_items.append(
             {
@@ -93,6 +117,7 @@ def cart_payload(cart: Cart) -> dict:
         "items": cart_items,
         "item_count": item_count,
         "total": money(cart_total),
+        "cart_review_token": review_token_for_canonical(reviewed_lines, cart_total),
     }
 
 

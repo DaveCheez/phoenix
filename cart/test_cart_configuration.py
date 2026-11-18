@@ -35,7 +35,7 @@ CART_ITEM_PAYLOAD_KEYS = {
     "sku",
     "image",
 }
-CART_PAYLOAD_KEYS = {"id", "items", "item_count", "total"}
+CART_PAYLOAD_KEYS = {"id", "items", "item_count", "total", "cart_review_token"}
 
 
 class ConfigurationSignatureTests(TestCase):

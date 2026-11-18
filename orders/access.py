@@ -1,9 +1,11 @@
 """Public unpaid-order submission and confirmation.
 
 The guest bearer is the credential. An order reference, cart UUID, email
-address or customer payload is not. Repeated calls of the internal
-``create_order_from_cart`` helper stay non-idempotent. This module is the
-only place that folds a guest and an idempotency key into one order.
+address, customer payload or basket-review marker is not. Repeated calls of
+the internal ``create_order_from_cart`` helper stay non-idempotent. This
+module is the only place that folds a guest and an idempotency key into one
+order. A stored attempt is replayed before the current review marker is
+compared, and the stored digest remains the customer fields only.
 """
 
 import hashlib
@@ -21,6 +23,7 @@ from .creation import (
 )
 from .exceptions import OrderCreationError
 from .models import Order, OrderCreationAttempt
+from .review import require_review_token
 
 
 _KEY = re.compile(r"\A[A-Za-z0-9_-]{8,80}\Z")
@@ -52,8 +55,17 @@ def parse_idempotency_key(value):
     return value
 
 
-def submit_guest_order(*, raw_token, idempotency_key, customer_fields):
-    """Create one unpaid order, or return the order already stored for this key."""
+def submit_guest_order(*, raw_token, idempotency_key, customer_fields, cart_review_token):
+    """Create one unpaid order, or return the order already stored for this key.
+
+    A committed attempt with this key and the same customer digest is
+    returned before the current basket marker is read. The digest stays the
+    customer fields only, so attempts stored before the marker still match.
+    A new attempt with a missing or malformed marker is rejected before an
+    attempt row is inserted. A marker that does not match the locked
+    snapshot aborts that same transaction, so neither the attempt nor an
+    order is committed.
+    """
     digest, customer = customer_request_hash(**customer_fields)
     key = parse_idempotency_key(idempotency_key)
     try:
@@ -64,6 +76,14 @@ def submit_guest_order(*, raw_token, idempotency_key, customer_fields):
                 for_update=True,
             )
             session = cart.guest_session
+            existing = (
+                OrderCreationAttempt.objects.select_for_update()
+                .filter(guest_session=session, idempotency_key=key)
+                .first()
+            )
+            if existing is not None:
+                return _completed_order(existing, digest), True
+            token = require_review_token(cart_review_token)
             attempt = OrderCreationAttempt(
                 guest_session=session,
                 idempotency_key=key,
@@ -73,6 +93,7 @@ def submit_guest_order(*, raw_token, idempotency_key, customer_fields):
             order = create_order_from_cart(
                 cart_id=cart.id,
                 guest_session=session,
+                review_token=token,
                 **customer,
             )
             attempt.order = order
@@ -97,14 +118,19 @@ def _replay(raw_token, key, digest):
             guest_session=cart.guest_session,
             idempotency_key=key,
         )
-        if attempt.request_hash != digest:
-            raise IdempotencyConflict()
-        if attempt.order_id is None:
-            raise OrderCreationError(
-                "ORDER_TEMPORARILY_UNAVAILABLE",
-                "The order could not be confirmed.",
-            )
-        return attempt.order
+        return _completed_order(attempt, digest)
+
+
+def _completed_order(attempt, digest):
+    """Return the stored order. The basket marker is intentionally unread."""
+    if attempt.request_hash != digest:
+        raise IdempotencyConflict()
+    if attempt.order_id is None:
+        raise OrderCreationError(
+            "ORDER_TEMPORARILY_UNAVAILABLE",
+            "The order could not be confirmed.",
+        )
+    return attempt.order
 
 
 def _is_attempt_conflict(exc):

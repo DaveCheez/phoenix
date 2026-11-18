@@ -35,6 +35,7 @@ from store.models import Product
 from .exceptions import OrderCreationError
 from .models import MAX_ORDER_QUANTITY, Order, OrderItem, OrderItemOption, generate_order_reference
 from .money import calculate_deposit
+from .review import assert_current_review
 
 
 REFERENCE_ATTEMPTS = 5
@@ -57,11 +58,16 @@ def create_order_from_cart(
     vehicle_wheelbase,
     vehicle_registration="",
     customer_notes="",
+    review_token=None,
 ) -> Order:
     """Build a finalised unpaid snapshot from the cart's current database rows.
 
     Prices, totals, deposit, reference, currency, payment state and
     fulfilment terms are calculated or set here. Callers cannot supply them.
+    When ``review_token`` is set, it is compared with the digest of the
+    lines prepared below before any order row is inserted. That comparison
+    uses those same lines. ``None`` keeps this helper available to internal
+    callers that do not review a basket.
     """
     customer = _customer_details(
         customer_name=customer_name,
@@ -78,6 +84,8 @@ def create_order_from_cart(
     with transaction.atomic():
         cart = _lock_cart(cart_id)
         lines = _snapshot_lines(cart)
+        if review_token is not None:
+            assert_current_review(lines, review_token)
         full_total = sum((line["line_total"] for line in lines), Decimal("0.00"))
         full_total = _exact_money(full_total)
         split = calculate_deposit(full_total)
