@@ -14,7 +14,9 @@ import re
 
 from django.db import IntegrityError, transaction
 
+from cart.guest_access import get_guest_session
 from cart.http_access import resolve_guest_cart
+from cart.models import CartItem
 
 from .creation import (
     _customer_details,
@@ -28,6 +30,7 @@ from .review import require_review_token
 
 _KEY = re.compile(r"\A[A-Za-z0-9_-]{8,80}\Z")
 ATTEMPT_CONSTRAINT = "order_creation_guest_key_uniq"
+HISTORY_PAGE_SIZE = 20
 
 
 class IdempotencyConflict(OrderCreationError):
@@ -65,17 +68,17 @@ def submit_guest_order(*, raw_token, idempotency_key, customer_fields, cart_revi
     attempt row is inserted. A marker that does not match the locked
     snapshot aborts that same transaction, so neither the attempt nor an
     order is committed.
+
+    The first successful submission also deletes the snapshotted basket
+    lines in that same transaction. A replay does not read or change the
+    current basket, including when that basket is empty or the cart row is
+    gone. Rate-limit accounting is not part of this transaction.
     """
     digest, customer = customer_request_hash(**customer_fields)
     key = parse_idempotency_key(idempotency_key)
     try:
         with transaction.atomic():
-            cart = resolve_guest_cart(
-                raw_token=raw_token,
-                asserted_cart_id=None,
-                for_update=True,
-            )
-            session = cart.guest_session
+            session = get_guest_session(raw_token=raw_token, for_update=True)
             existing = (
                 OrderCreationAttempt.objects.select_for_update()
                 .filter(guest_session=session, idempotency_key=key)
@@ -83,6 +86,11 @@ def submit_guest_order(*, raw_token, idempotency_key, customer_fields, cart_revi
             )
             if existing is not None:
                 return _completed_order(existing, digest), True
+            cart = resolve_guest_cart(
+                raw_token=raw_token,
+                asserted_cart_id=None,
+                for_update=True,
+            )
             token = require_review_token(cart_review_token)
             attempt = OrderCreationAttempt(
                 guest_session=session,
@@ -90,14 +98,18 @@ def submit_guest_order(*, raw_token, idempotency_key, customer_fields, cart_revi
                 request_hash=digest,
             )
             attempt.save()
+            submitted_line_ids = []
             order = create_order_from_cart(
                 cart_id=cart.id,
                 guest_session=session,
                 review_token=token,
+                submitted_line_ids=submitted_line_ids,
                 **customer,
             )
             attempt.order = order
             attempt.save(update_fields=["order"])
+            _clear_submitted_lines(cart.id, submitted_line_ids)
+            _submission_ready_to_commit()
             return order, False
     except IntegrityError as exc:
         if _is_reference_integrity_error(exc) or not _is_attempt_conflict(exc):
@@ -105,17 +117,52 @@ def submit_guest_order(*, raw_token, idempotency_key, customer_fields, cart_revi
     return _replay(raw_token, key, digest), True
 
 
+def _clear_submitted_lines(cart_id, line_ids):
+    """Delete the locked lines that were copied into this submission.
+
+    The cart row stays. Catalogue options and order snapshots are different
+    rows and are not deleted. Callers hold the cart lock for this
+    transaction, so a line added after this snapshot is not in ``line_ids``.
+    """
+    expected = [line_id for line_id in line_ids]
+    if not expected or len(set(expected)) != len(expected):
+        raise OrderCreationError(
+            "ORDER_TEMPORARILY_UNAVAILABLE",
+            "The order could not be confirmed.",
+        )
+    locked_ids = set(
+        CartItem.objects.select_for_update()
+        .filter(cart_id=cart_id, pk__in=expected)
+        .values_list("pk", flat=True)
+    )
+    if locked_ids != set(expected):
+        raise OrderCreationError(
+            "ORDER_TEMPORARILY_UNAVAILABLE",
+            "The order could not be confirmed.",
+        )
+    _deleted, breakdown = CartItem.objects.filter(
+        cart_id=cart_id,
+        pk__in=expected,
+    ).delete()
+    if breakdown.get("cart.CartItem", 0) != len(expected):
+        raise OrderCreationError(
+            "ORDER_TEMPORARILY_UNAVAILABLE",
+            "The order could not be confirmed.",
+        )
+
+
+def _submission_ready_to_commit():
+    """Last step of the open submission transaction. Not an on-commit hook."""
+    return None
+
+
 def _replay(raw_token, key, digest):
     with transaction.atomic():
-        cart = resolve_guest_cart(
-            raw_token=raw_token,
-            asserted_cart_id=None,
-            for_update=True,
-        )
+        session = get_guest_session(raw_token=raw_token, for_update=True)
         # Lock the attempt only. Joining the nullable order is an outer join,
         # and PostgreSQL rejects FOR UPDATE on that nullable side.
         attempt = OrderCreationAttempt.objects.select_for_update().get(
-            guest_session=cart.guest_session,
+            guest_session=session,
             idempotency_key=key,
         )
         return _completed_order(attempt, digest)
@@ -164,6 +211,35 @@ def order_for_guest(*, session, reference):
         .prefetch_related("items__selected_options")
         .first()
     )
+
+
+def order_history_for_guest(*, session, page):
+    """Return one bounded page of this guest's orders, newest first."""
+    start = (page - 1) * HISTORY_PAGE_SIZE
+    rows = list(
+        Order.objects.filter(guest_session=session)
+        .order_by("-created_at", "-id")
+        .values(
+            "reference",
+            "created_at",
+            "currency",
+            "full_total",
+            "payment_status",
+        )[start : start + HISTORY_PAGE_SIZE + 1]
+    )
+    has_more = len(rows) > HISTORY_PAGE_SIZE
+    return rows[:HISTORY_PAGE_SIZE], has_more
+
+
+def public_order_summary(row):
+    """List fields only. No customer, basket, credential, or internal data."""
+    return {
+        "reference": row["reference"],
+        "created_at": row["created_at"].isoformat(),
+        "currency": row["currency"],
+        "full_total": format(row["full_total"], "f"),
+        "payment_status": row["payment_status"],
+    }
 
 
 def public_order(order):

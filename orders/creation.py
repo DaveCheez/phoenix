@@ -59,6 +59,7 @@ def create_order_from_cart(
     vehicle_registration="",
     customer_notes="",
     review_token=None,
+    submitted_line_ids=None,
 ) -> Order:
     """Build a finalised unpaid snapshot from the cart's current database rows.
 
@@ -67,7 +68,10 @@ def create_order_from_cart(
     When ``review_token`` is set, it is compared with the digest of the
     lines prepared below before any order row is inserted. That comparison
     uses those same lines. ``None`` keeps this helper available to internal
-    callers that do not review a basket.
+    callers that do not review a basket. This helper does not delete basket
+    lines. A caller that wants the snapshotted cart-line ids passes a list
+    as ``submitted_line_ids``; those ids are appended from the same locked
+    lines, after the review check and before the snapshot is inserted.
     """
     customer = _customer_details(
         customer_name=customer_name,
@@ -86,6 +90,8 @@ def create_order_from_cart(
         lines = _snapshot_lines(cart)
         if review_token is not None:
             assert_current_review(lines, review_token)
+        if submitted_line_ids is not None:
+            submitted_line_ids.extend(line["cart_item_id"] for line in lines)
         full_total = sum((line["line_total"] for line in lines), Decimal("0.00"))
         full_total = _exact_money(full_total)
         split = calculate_deposit(full_total)
@@ -284,6 +290,7 @@ def _snapshot_lines(cart):
         lines.append(
             {
                 "position": position,
+                "cart_item_id": item.id,
                 "product": product,
                 "signature": signature,
                 "quantity": item.quantity,

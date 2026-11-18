@@ -184,7 +184,7 @@ class UnpaidOrderReviewTests(APITestCase):
         self.assertEqual(stored.amount_paid, Decimal("0.00"))
         self.assertEqual(stored.payment_status, "pending_deposit")
         self.assertEqual(stored.source_cart_id, self.issued.cart.id)
-        self.assertEqual(self.issued.cart.items.count(), 2)
+        self.assertEqual(self.issued.cart.items.count(), 0)
         self.assertEqual(
             OrderCreationAttempt.objects.get().request_hash,
             customer_request_hash(
@@ -201,7 +201,12 @@ class UnpaidOrderReviewTests(APITestCase):
             {"250.00", "100.00"},
         )
 
-        second = self._order(token, key="review-key-2")
+        self._add([self.catalogue["enhanced"].id, self.catalogue["none"].id], quantity=2)
+        added_again = self._add([self.catalogue["standard"].id, self.catalogue["none"].id])
+        second = self._order(
+            added_again.data["cart"]["cart_review_token"],
+            key="review-key-2",
+        )
         self.assertEqual(second.status_code, 201, second.content)
         self.assertNotEqual(second.data["order"]["reference"], order["reference"])
         self.assertEqual(Order.objects.count(), 2)
@@ -209,7 +214,7 @@ class UnpaidOrderReviewTests(APITestCase):
             set(Order.objects.values_list("source_cart_id", flat=True)),
             {self.issued.cart.id},
         )
-        self.assertEqual(self.issued.cart.items.count(), 2)
+        self.assertEqual(self.issued.cart.items.count(), 0)
         for row in Order.objects.all():
             self.assertEqual(row.payment_status, "pending_deposit")
             self.assertEqual(row.amount_paid, Decimal("0.00"))
@@ -293,7 +298,7 @@ class UnpaidOrderReviewTests(APITestCase):
         created = self._order(reviewed.data["cart"]["cart_review_token"], key="price-ok")
         self.assertEqual(created.status_code, 201, created.content)
         self.assertEqual(created.data["order"]["items"][0]["configured_unit_price"], "175.00")
-        self.assertEqual(self.issued.cart.items.count(), 1)
+        self.assertEqual(self.issued.cart.items.count(), 0)
 
     def test_same_key_returns_the_original_snapshot_after_the_basket_changes(self):
         added = self._add([self.catalogue["enhanced"].id, self.catalogue["none"].id])
@@ -303,21 +308,20 @@ class UnpaidOrderReviewTests(APITestCase):
         self.assertEqual(created.status_code, 201, created.content)
         reference = created.data["order"]["reference"]
         original_total = created.data["order"]["full_total"]
+        self.assertFalse(self.issued.cart.items.filter(pk=item_id).exists())
 
         self.catalogue["product"].price = Decimal("180.00")
         self.catalogue["product"].save(update_fields=["price"])
-        self.client.patch(
-            "/api/cart/update/",
-            {"item_id": item_id, "quantity": 4},
-            format="json",
-        )
+        added_later = self._add([self.catalogue["standard"].id, self.catalogue["none"].id])
+        self.assertEqual(added_later.status_code, 201, added_later.content)
+        later_id = added_later.data["cart"]["items"][0]["item_id"]
         retry = self._order(token, key="retry-key")
         self.assertEqual(retry.status_code, 200, retry.content)
         self.assertEqual(retry.data["order"]["reference"], reference)
         self.assertEqual(retry.data["order"]["full_total"], original_total)
         self.assertEqual(retry.data["order"]["items"][0]["configured_unit_price"], "125.00")
         self.assertEqual(Order.objects.count(), 1)
-        self.assertEqual(self.issued.cart.items.get().quantity, 4)
+        self.assertEqual(self.issued.cart.items.get().id, later_id)
 
         stale_marker = self._order("0" * 64, key="retry-key")
         self.assertEqual(stale_marker.status_code, 200, stale_marker.content)
