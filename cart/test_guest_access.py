@@ -297,7 +297,7 @@ class GuestSessionPublicCartTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             set(response.data["cart"]),
-            {"id", "items", "item_count", "total"},
+            {"id", "items", "item_count", "total", "cart_review_token"},
         )
         encoded = str(response.data)
         self.assertNotIn(issued.raw_token, encoded)

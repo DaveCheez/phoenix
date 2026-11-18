@@ -2,6 +2,10 @@
 
 Application authentication runs first. The guest bearer is the only customer
 credential. Prices in the body are rejected rather than stored.
+
+``cart_review_token`` is an opaque consistency marker copied from the cart
+payload. It is not a credential. The exact contract is documented in
+``docs/public-order-api.md``.
 """
 
 from django.views.decorators.debug import sensitive_variables
@@ -24,6 +28,7 @@ from .access import (
     submit_guest_order,
 )
 from .exceptions import OrderCreationError
+from .review import CartChanged
 
 
 _CUSTOMER_FIELDS = {
@@ -38,6 +43,7 @@ _CUSTOMER_FIELDS = {
     "customer_notes",
 }
 _OPTIONAL = {"vehicle_registration", "customer_notes"}
+_BODY_FIELDS = _CUSTOMER_FIELDS | {"cart_review_token"}
 
 _APPLICATION_REJECTED = {
     "success": False,
@@ -93,8 +99,8 @@ def _gate(request):
     return None
 
 
-def _customer_body(data):
-    if not isinstance(data, dict) or set(data) - _CUSTOMER_FIELDS:
+def _order_request(data):
+    if not isinstance(data, dict) or set(data) - _BODY_FIELDS:
         raise OrderCreationError("ORDER_REQUEST_INVALID", "The order request is not valid.")
     if not _CUSTOMER_FIELDS - _OPTIONAL <= set(data):
         raise OrderCreationError("ORDER_REQUEST_INVALID", "The order request is not valid.")
@@ -102,7 +108,7 @@ def _customer_body(data):
     year = values["vehicle_year"]
     if isinstance(year, bool) or not isinstance(year, int):
         raise OrderCreationError("INVALID_VEHICLE", "The vehicle details are not valid.")
-    return values
+    return values, data.get("cart_review_token", None)
 
 
 @api_view(["POST"])
@@ -122,11 +128,12 @@ def create_order(request):
         return _access_denied()
     try:
         key = parse_idempotency_key(request.headers.get("Idempotency-Key"))
-        fields = _customer_body(request.data)
+        fields, review_token = _order_request(request.data)
         order, replayed = submit_guest_order(
             raw_token=bearer.token,
             idempotency_key=key,
             customer_fields=fields,
+            cart_review_token=review_token,
         )
     except (OrderCreationError, CartOptionError, GuestAccessError, GuestCartMissing) as exc:
         return _creation_error(exc)
@@ -168,7 +175,7 @@ def _creation_error(exc):
                 status=exc.http_status,
             )
         )
-    if isinstance(exc, IdempotencyConflict):
+    if isinstance(exc, (IdempotencyConflict, CartChanged)):
         return _finish(
             Response(
                 {"success": False, "code": exc.code, "error": exc.message},
