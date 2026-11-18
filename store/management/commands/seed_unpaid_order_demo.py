@@ -113,14 +113,6 @@ def _seed():
     _option(material, "Insulated", Decimal("45.00"), display_order=20, is_default=False)
     _option(fixings, "None", Decimal("0.00"), display_order=10, is_default=True)
 
-    _product(
-        category,
-        slug="order-history-demo",
-        name="Order History Demo",
-        description="Local demo product with no option groups.",
-        price=Decimal("60.00"),
-    )
-
 
 def _product(category, *, slug, name, description, price):
     product = Product.objects.filter(slug=slug).order_by("id").first()

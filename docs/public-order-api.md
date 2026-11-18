@@ -135,7 +135,9 @@ or revoked bearer gets the existing access error, not an empty success.
 
 Each row uses the stored reference, timestamp, currency, total, and payment
 status. No new payment status is introduced. The list does not include
-customer details, line items, credentials, or internal ids.
+customer details, line items, credentials, or internal ids. Listing orders
+and clearing the submitted basket lines use the existing order and cart
+tables. No new migration and no new setting.
 
 ## Read
 
