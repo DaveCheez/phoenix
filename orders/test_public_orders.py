@@ -1,16 +1,18 @@
 """Public unpaid order creation and confirmation."""
 
 import threading
+import time
 import unittest
 from decimal import Decimal
+from unittest.mock import patch
 
-from django.db import connection
+from django.db import connection, transaction
 from django.test import TransactionTestCase, override_settings
 from rest_framework.test import APIClient, APITransactionTestCase
 
 from cart.configuration import build_configuration_signature
 from cart.guest_access import issue_guest_cart
-from cart.models import CartItem, CartItemOption
+from cart.models import Cart, CartItem, CartItemOption, GuestSession
 from cart.test_application_client import (
     TEST_APP_CREDENTIAL,
     TEST_SHOPPER_ADDRESS,
@@ -95,7 +97,8 @@ class PublicOrderTests(APITransactionTestCase):
         self.assertEqual(order.fitting_charge, Decimal("0.00"))
         self.assertEqual(order.tax_amount, Decimal("0.00"))
         self.assertEqual(order.guest_session_id, self.issued.cart.guest_session_id)
-        self.assertEqual(self.issued.cart.items.count(), 1)
+        self.issued.cart.refresh_from_db()
+        self.assertEqual(self.issued.cart.items.count(), 0)
         self.assertEqual(response["Cache-Control"], "no-store")
         self.assertEqual(response.data["order"]["reference"], order.reference)
         self.assertNotIn("internal_notes", response.data["order"])
@@ -222,4 +225,184 @@ class PublicOrderPostgresTests(TransactionTestCase):
         self.assertEqual(errors, [])
         self.assertEqual(sorted(results), [200, 201])
         self.assertEqual(Order.objects.count(), 1)
-        self.assertEqual(issued.cart.items.count(), 1)
+        issued.cart.refresh_from_db()
+        self.assertEqual(issued.cart.items.count(), 0)
+        self.assertIsNotNone(issued.cart.guest_session_id)
+
+    def test_mutation_before_submit_rejects_the_stale_review(self):
+        catalogue = build_catalogue()
+        issued = _guest_cart(catalogue)
+        token = review_token_for_cart(issued.cart)
+        item = issued.cart.items.get()
+        held = threading.Event()
+        release = threading.Event()
+        state = {}
+
+        def mutate():
+            from django.db import connection as thread_connection
+
+            thread_connection.close()
+            try:
+                with transaction.atomic():
+                    GuestSession.objects.select_for_update().get(
+                        pk=issued.cart.guest_session_id
+                    )
+                    Cart.objects.select_for_update().get(pk=issued.cart.id)
+                    item.quantity = 3
+                    item.save(update_fields=["quantity", "updated_at"])
+                    held.set()
+                    self.assertTrue(release.wait(20))
+            except Exception as exc:
+                state["mutate_error"] = exc
+                held.set()
+            finally:
+                thread_connection.close()
+
+        def submit():
+            from django.db import connection as thread_connection
+
+            thread_connection.close()
+            try:
+                thread_connection.ensure_connection()
+                state["submit_pid"] = thread_connection.connection.get_backend_pid()
+                state["submit_ready"] = True
+                response = CartAPIClient().post(
+                    "/api/orders/",
+                    {**_CUSTOMER, "cart_review_token": token},
+                    format="json",
+                    HTTP_AUTHORIZATION=f"Bearer {issued.raw_token}",
+                    HTTP_IDEMPOTENCY_KEY="stale-race-1",
+                )
+                state["status"] = response.status_code
+                state["code"] = response.data.get("code")
+            except Exception as exc:
+                state["submit_error"] = exc
+            finally:
+                thread_connection.close()
+
+        mutator = threading.Thread(target=mutate)
+        mutator.start()
+        submitter = threading.Thread(target=submit)
+        try:
+            self.assertTrue(held.wait(15))
+            self.assertNotIn("mutate_error", state)
+            submitter.start()
+            deadline = time.monotonic() + 15
+            while "submit_pid" not in state and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertIn("submit_pid", state)
+            self.assertTrue(_wait_for_lock(state["submit_pid"]))
+        finally:
+            release.set()
+            mutator.join(20)
+            if submitter.is_alive() or "submit_pid" in state:
+                submitter.join(20)
+        self.assertFalse(mutator.is_alive())
+        self.assertFalse(submitter.is_alive())
+        self.assertNotIn("mutate_error", state)
+        self.assertNotIn("submit_error", state)
+        self.assertEqual(state["status"], 409)
+        self.assertEqual(state["code"], "CART_CHANGED")
+        self.assertFalse(Order.objects.exists())
+        self.assertFalse(OrderCreationAttempt.objects.exists())
+        item.refresh_from_db()
+        self.assertEqual(item.quantity, 3)
+
+    def test_submit_before_add_keeps_the_later_line(self):
+        catalogue = build_catalogue()
+        issued = _guest_cart(catalogue)
+        submitted_id = issued.cart.items.get().id
+        token = review_token_for_cart(issued.cart)
+        held = threading.Event()
+        release = threading.Event()
+        state = {}
+
+        def pause():
+            held.set()
+            self.assertTrue(release.wait(20))
+
+        def submit():
+            from django.db import connection as thread_connection
+
+            thread_connection.close()
+            try:
+                response = CartAPIClient().post(
+                    "/api/orders/",
+                    {**_CUSTOMER, "cart_review_token": token},
+                    format="json",
+                    HTTP_AUTHORIZATION=f"Bearer {issued.raw_token}",
+                    HTTP_IDEMPOTENCY_KEY="clear-race-1",
+                )
+                state["status"] = response.status_code
+                state["reference"] = response.data.get("order", {}).get("reference")
+            except Exception as exc:
+                state["submit_error"] = exc
+            finally:
+                thread_connection.close()
+
+        def add_later():
+            from django.db import connection as thread_connection
+
+            thread_connection.close()
+            try:
+                thread_connection.ensure_connection()
+                state["add_pid"] = thread_connection.connection.get_backend_pid()
+                response = CartAPIClient().post(
+                    "/api/cart/add/",
+                    {
+                        "product_id": catalogue["product"].id,
+                        "quantity": 2,
+                        "options": [catalogue["no_lights"].id, catalogue["lwb"].id],
+                    },
+                    format="json",
+                    HTTP_AUTHORIZATION=f"Bearer {issued.raw_token}",
+                )
+                state["add_status"] = response.status_code
+            except Exception as exc:
+                state["add_error"] = exc
+            finally:
+                thread_connection.close()
+
+        submitter = threading.Thread(target=submit)
+        adder = threading.Thread(target=add_later)
+        with patch("orders.access._submission_ready_to_commit", side_effect=pause):
+            submitter.start()
+            try:
+                self.assertTrue(held.wait(15))
+                adder.start()
+                deadline = time.monotonic() + 15
+                while "add_pid" not in state and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertIn("add_pid", state)
+                self.assertTrue(_wait_for_lock(state["add_pid"]))
+            finally:
+                release.set()
+                submitter.join(20)
+                adder.join(20)
+        self.assertNotIn("submit_error", state)
+        self.assertNotIn("add_error", state)
+        self.assertEqual(state["status"], 201)
+        self.assertEqual(state["add_status"], 201)
+        self.assertEqual(Order.objects.count(), 1)
+        order = Order.objects.get()
+        self.assertEqual(order.reference, state["reference"])
+        self.assertEqual(order.items.get().quantity, 1)
+        remaining = CartItem.objects.get(cart=issued.cart)
+        self.assertNotEqual(remaining.id, submitted_id)
+        self.assertEqual(remaining.quantity, 2)
+        self.assertTrue(Cart.objects.filter(pk=issued.cart.id).exists())
+
+
+def _wait_for_lock(pid):
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s",
+                [pid],
+            )
+            row = cursor.fetchone()
+        if row and row[0] == "Lock":
+            return True
+        time.sleep(0.05)
+    return False

@@ -8,6 +8,8 @@ payload. It is not a credential. The exact contract is documented in
 ``docs/public-order-api.md``.
 """
 
+import re
+
 from django.views.decorators.debug import sensitive_variables
 from rest_framework import status
 from rest_framework.decorators import api_view, authentication_classes, parser_classes, permission_classes
@@ -23,8 +25,10 @@ from cart.http_access import GuestCartMissing, read_bearer
 from .access import (
     IdempotencyConflict,
     order_for_guest,
+    order_history_for_guest,
     parse_idempotency_key,
     public_order,
+    public_order_summary,
     submit_guest_order,
 )
 from .exceptions import OrderCreationError
@@ -44,6 +48,7 @@ _CUSTOMER_FIELDS = {
 }
 _OPTIONAL = {"vehicle_registration", "customer_notes"}
 _BODY_FIELDS = _CUSTOMER_FIELDS | {"cart_review_token"}
+_PAGE = re.compile(r"\A[1-9][0-9]{0,3}\Z")
 
 _APPLICATION_REJECTED = {
     "success": False,
@@ -111,7 +116,7 @@ def _order_request(data):
     return values, data.get("cart_review_token", None)
 
 
-@api_view(["POST"])
+@api_view(["GET", "POST"])
 @authentication_classes([])
 @permission_classes([AllowAny])
 @parser_classes([JSONParser])
@@ -126,6 +131,8 @@ def create_order(request):
         return _access_denied()
     if bearer.absent:
         return _access_denied()
+    if request.method == "GET":
+        return _order_history(request, bearer)
     try:
         key = parse_idempotency_key(request.headers.get("Idempotency-Key"))
         fields, review_token = _order_request(request.data)
@@ -163,6 +170,30 @@ def order_confirmation(request, reference):
     if order is None:
         return _unavailable()
     return _finish(Response({"success": True, "order": public_order(order)}))
+
+
+def _order_history(request, bearer):
+    """List this live guest's orders. A basket is not required."""
+    if set(request.query_params) != {"page"}:
+        return _invalid()
+    pages = request.query_params.getlist("page")
+    if len(pages) != 1 or _PAGE.fullmatch(pages[0]) is None:
+        return _invalid()
+    try:
+        session = get_guest_session(raw_token=bearer.token, for_update=False)
+    except GuestAccessError:
+        return _access_denied()
+    rows, has_more = order_history_for_guest(session=session, page=int(pages[0]))
+    return _finish(
+        Response(
+            {
+                "success": True,
+                "orders": [public_order_summary(row) for row in rows],
+                "page": int(pages[0]),
+                "has_more": has_more,
+            }
+        )
+    )
 
 
 def _creation_error(exc):
